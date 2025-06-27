@@ -117,7 +117,8 @@ class DicomClient:
     
     def query_patient(self, patient_id: str = None, name_pattern: str = None, 
                      birth_date: str = None, attribute_preset: str = "standard",
-                     additional_attrs: List[str] = None, exclude_attrs: List[str] = None) -> List[Dict[str, Any]]:
+                     additional_attrs: List[str] = None, exclude_attrs: List[str] = None,
+                     additional_filters: Dict[str, str] = None) -> List[Dict[str, Any]]:
         """Query for patients matching criteria.
         
         Args:
@@ -127,6 +128,7 @@ class DicomClient:
             attribute_preset: Attribute preset (minimal, standard, extended)
             additional_attrs: Additional attributes to include
             exclude_attrs: Attributes to exclude
+            additional_filters: Dictionary of additional DICOM tags to use for filtering
             
         Returns:
             List of matching patient records
@@ -144,6 +146,10 @@ class DicomClient:
             
         if birth_date:
             ds.PatientBirthDate = birth_date
+
+        if additional_filters:
+            for key, value in additional_filters.items():
+                setattr(ds, key, value)
         
         # Add attributes based on preset
         attrs = get_attributes_for_level("patient", attribute_preset, additional_attrs, exclude_attrs)
@@ -158,7 +164,7 @@ class DicomClient:
                    modality: str = None, study_description: str = None, 
                    accession_number: str = None, study_instance_uid: str = None,
                    attribute_preset: str = "standard", additional_attrs: List[str] = None, 
-                   exclude_attrs: List[str] = None) -> List[Dict[str, Any]]:
+                   exclude_attrs: List[str] = None, additional_filters: Dict[str, str] = None) -> List[Dict[str, Any]]:
         """Query for studies matching criteria.
         
         Args:
@@ -171,6 +177,7 @@ class DicomClient:
             attribute_preset: Attribute preset (minimal, standard, extended)
             additional_attrs: Additional attributes to include
             exclude_attrs: Attributes to exclude
+            additional_filters: Dictionary of additional DICOM tags to use for filtering
             
         Returns:
             List of matching study records
@@ -197,6 +204,10 @@ class DicomClient:
             
         if study_instance_uid:
             ds.StudyInstanceUID = study_instance_uid
+
+        if additional_filters:
+            for key, value in additional_filters.items():
+                setattr(ds, key, value)
         
         # Add attributes based on preset
         attrs = get_attributes_for_level("study", attribute_preset, additional_attrs, exclude_attrs)
@@ -210,7 +221,8 @@ class DicomClient:
     def query_series(self, study_instance_uid: str, series_instance_uid: str = None,
                     modality: str = None, series_number: str = None, 
                     series_description: str = None, attribute_preset: str = "standard",
-                    additional_attrs: List[str] = None, exclude_attrs: List[str] = None) -> List[Dict[str, Any]]:
+                    additional_attrs: List[str] = None, exclude_attrs: List[str] = None,
+                    additional_filters: Dict[str, str] = None) -> List[Dict[str, Any]]:
         """Query for series matching criteria.
         
         Args:
@@ -222,6 +234,7 @@ class DicomClient:
             attribute_preset: Attribute preset (minimal, standard, extended)
             additional_attrs: Additional attributes to include
             exclude_attrs: Attributes to exclude
+            additional_filters: Dictionary of additional DICOM tags to use for filtering
             
         Returns:
             List of matching series records
@@ -243,6 +256,10 @@ class DicomClient:
             
         if series_description:
             ds.SeriesDescription = series_description
+
+        if additional_filters:
+            for key, value in additional_filters.items():
+                setattr(ds, key, value)
         
         # Add attributes based on preset
         attrs = get_attributes_for_level("series", attribute_preset, additional_attrs, exclude_attrs)
@@ -255,7 +272,8 @@ class DicomClient:
     
     def query_instance(self, series_instance_uid: str, sop_instance_uid: str = None,
                       instance_number: str = None, attribute_preset: str = "standard",
-                      additional_attrs: List[str] = None, exclude_attrs: List[str] = None) -> List[Dict[str, Any]]:
+                      additional_attrs: List[str] = None, exclude_attrs: List[str] = None,
+                      additional_filters: Dict[str, str] = None) -> List[Dict[str, Any]]:
         """Query for instances matching criteria.
         
         Args:
@@ -265,6 +283,7 @@ class DicomClient:
             attribute_preset: Attribute preset (minimal, standard, extended)
             additional_attrs: Additional attributes to include
             exclude_attrs: Attributes to exclude
+            additional_filters: Dictionary of additional DICOM tags to use for filtering
             
         Returns:
             List of matching instance records
@@ -280,6 +299,10 @@ class DicomClient:
             
         if instance_number:
             ds.InstanceNumber = instance_number
+
+        if additional_filters:
+            for key, value in additional_filters.items():
+                setattr(ds, key, value)
         
         # Add attributes based on preset
         attrs = get_attributes_for_level("instance", attribute_preset, additional_attrs, exclude_attrs)

@@ -3,15 +3,20 @@ DICOM MCP Server main implementation.
 """
 
 import logging
+import threading
+import pydicom
+from pathlib import Path
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Any, AsyncIterator
+import httpx # Import httpx for DICOMweb operations
 
 from mcp.server.fastmcp import FastMCP, Context
 
 from .attributes import ATTRIBUTE_PRESETS
 from .dicom_client import DicomClient
 from .config import DicomConfiguration, load_config
+from .dicom_scp import start_scp_server
 
 # Configure logging
 logger = logging.getLogger("dicom_mcp")
@@ -23,6 +28,8 @@ class DicomContext:
     config: DicomConfiguration
     client: DicomClient
 
+scp_thread: threading.Thread = None
+scp_server_instance = None
 
 def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMCP:
     """Create and configure a DICOM MCP server."""
@@ -30,6 +37,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
     # Define a simple lifespan function
     @asynccontextmanager
     async def lifespan(server: FastMCP) -> AsyncIterator[DicomContext]:
+        global scp_thread, scp_server_instance
         # Load config
         config = load_config(config_path)
         
@@ -46,10 +54,31 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         
         logger.info(f"DICOM client initialized: {config.current_node} (calling AE: {config.calling_aet})")
         
+        # Start SCP server in a separate thread
+        def server_callback(server_instance):            global scp_server_instance
+            scp_server_instance = server_instance
+
+        scp_thread = threading.Thread(
+            target=start_scp_server,
+            args=(config, server_callback,),
+            daemon=True
+        )
+        scp_thread.start()
+        
         try:
             yield DicomContext(config=config, client=client)
         finally:
-            pass
+            logger.info("Shutting down DICOM MCP server...")
+            if scp_server_instance:
+                logger.info("Requesting SCP server shutdown...")
+                scp_server_instance.shutdown()
+            
+            if scp_thread and scp_thread.is_alive():
+                logger.info("Waiting for SCP thread to finish...")
+                scp_thread.join(timeout=5.0)
+                if scp_thread.is_alive():
+                    logger.warning("Warning: SCP server thread did not terminate cleanly.")
+            logger.info("Shutdown complete.")
     
     # Create server
     mcp = FastMCP(name, lifespan=lifespan)
@@ -85,48 +114,6 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             "nodes": nodes,
         }
     
-    @mcp.tool()
-    def extract_pdf_text_from_dicom(
-        study_instance_uid: str,
-        series_instance_uid: str,
-        sop_instance_uid: str,
-        ctx: Context = None
-    ) -> Dict[str, Any]:
-        """Retrieve a DICOM instance with encapsulated PDF and extract its text content.
-        
-        This tool retrieves a DICOM instance containing an encapsulated PDF document,
-        extracts the PDF, and converts it to text. This is particularly useful for
-        medical reports stored as PDFs within DICOM format (e.g., radiology reports,
-        clinical documents).
-        
-        Args:
-            study_instance_uid: The unique identifier for the study (required)
-            series_instance_uid: The unique identifier for the series within the study (required)
-            sop_instance_uid: The unique identifier for the specific DICOM instance (required)
-        
-        Returns:
-            Dictionary containing:
-            - success: Boolean indicating if the operation was successful
-            - message: Description of the operation result or error
-            - text_content: The extracted text from the PDF (if successful)
-            - file_path: Path to the temporary DICOM file (for debugging purposes)
-        
-        Example:
-            {
-                "success": true,
-                "message": "Successfully extracted text from PDF in DICOM",
-                "text_content": "Patient report contents...",
-                "file_path": "/tmp/tmpdir123/1.2.3.4.5.6.7.8.dcm"
-            }
-        """
-        dicom_ctx = ctx.request_context.lifespan_context
-        client:DicomClient = dicom_ctx.client
-        
-        return client.extract_pdf_text_from_dicom(
-            study_instance_uid=study_instance_uid,
-            series_instance_uid=series_instance_uid,
-            sop_instance_uid=sop_instance_uid
-        )
 
     @mcp.tool()
     def switch_dicom_node(node_name: str, ctx: Context = None) -> Dict[str, Any]:
@@ -205,7 +192,8 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         birth_date: str = "", 
         attribute_preset: str = "standard", 
         additional_attributes: List[str] = None,
-        exclude_attributes: List[str] = None, 
+        exclude_attributes: List[str] = None,
+        additional_filters: Dict[str, str] = None,
         ctx: Context = None
     ) -> List[Dict[str, Any]]:
         """Query patients matching the specified criteria from the DICOM node.
@@ -224,6 +212,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 - "extended": All available attributes
             additional_attributes: List of specific DICOM attributes to include beyond the preset
             exclude_attributes: List of DICOM attributes to exclude from the results
+            additional_filters: Dictionary of additional DICOM tags to use for filtering, e.g., {"PatientSex": "F"}
         
         Returns:
             List of dictionaries, each representing a matched patient with their attributes
@@ -251,7 +240,8 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 birth_date=birth_date,
                 attribute_preset=attribute_preset,
                 additional_attrs=additional_attributes,
-                exclude_attrs=exclude_attributes
+                exclude_attrs=exclude_attributes,
+                additional_filters=additional_filters
             )
         except Exception as e:
             raise Exception(f"Error querying patients: {str(e)}")
@@ -266,45 +256,26 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         study_instance_uid: str = "",
         attribute_preset: str = "standard", 
         additional_attributes: List[str] = None,
-        exclude_attributes: List[str] = None, 
+        exclude_attributes: List[str] = None,
+        additional_filters: Dict[str, str] = None,
         ctx: Context = None
     ) -> List[Dict[str, Any]]:
         """Query studies matching the specified criteria from the DICOM node.
         
-        This tool performs a DICOM C-FIND operation at the STUDY level to find studies
-        matching the provided search criteria. All search parameters are optional and can
-        be combined for more specific queries.
-        
         Args:
             patient_id: Patient ID to search for, e.g., "12345678"
-            study_date: Study date or date range in DICOM format:
-                - Single date: "20230101"
-                - Date range: "20230101-20230131"
+            study_date: Study date or date range in DICOM format: "20230101" or "20230101-20230131"
             modality_in_study: Filter by modalities present in study, e.g., "CT" or "MR"
             study_description: Study description text (can include wildcards), e.g., "CHEST*"
             accession_number: Medical record accession number
             study_instance_uid: Unique identifier for a specific study
-            attribute_preset: Controls which attributes to include in results:
-                - "minimal": Only essential attributes
-                - "standard": Common attributes (default)
-                - "extended": All available attributes
+            attribute_preset: Controls which attributes to include in results
             additional_attributes: List of specific DICOM attributes to include beyond the preset
             exclude_attributes: List of DICOM attributes to exclude from the results
+            additional_filters: Dictionary of additional DICOM tags to use for filtering
         
         Returns:
             List of dictionaries, each representing a matched study with its attributes
-        
-        Example:
-            [
-                {
-                    "StudyInstanceUID": "1.2.840.113619.2.1.1.322.1600364094.412.1009",
-                    "StudyDate": "20230215",
-                    "StudyDescription": "CHEST CT",
-                    "PatientID": "12345",
-                    "PatientName": "SMITH^JOHN",
-                    "ModalitiesInStudy": "CT"
-                }
-            ]
         
         Raises:
             Exception: If there is an error communicating with the DICOM node
@@ -322,7 +293,8 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 study_instance_uid=study_instance_uid,
                 attribute_preset=attribute_preset,
                 additional_attrs=additional_attributes,
-                exclude_attrs=exclude_attributes
+                exclude_attrs=exclude_attributes,
+                additional_filters=additional_filters
             )
         except Exception as e:
             raise Exception(f"Error querying studies: {str(e)}")
@@ -336,14 +308,11 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         series_instance_uid: str = "",
         attribute_preset: str = "standard", 
         additional_attributes: List[str] = None,
-        exclude_attributes: List[str] = None, 
+        exclude_attributes: List[str] = None,
+        additional_filters: Dict[str, str] = None,
         ctx: Context = None
     ) -> List[Dict[str, Any]]:
         """Query series within a study from the DICOM node.
-        
-        This tool performs a DICOM C-FIND operation at the SERIES level to find series
-        within a specified study. The study_instance_uid is required, and additional
-        parameters can be used to filter the results.
         
         Args:
             study_instance_uid: Unique identifier for the study (required)
@@ -351,26 +320,13 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             series_number: Filter by series number
             series_description: Series description text (can include wildcards), e.g., "AXIAL*"
             series_instance_uid: Unique identifier for a specific series
-            attribute_preset: Controls which attributes to include in results:
-                - "minimal": Only essential attributes
-                - "standard": Common attributes (default)
-                - "extended": All available attributes
+            attribute_preset: Controls which attributes to include in results
             additional_attributes: List of specific DICOM attributes to include beyond the preset
             exclude_attributes: List of DICOM attributes to exclude from the results
+            additional_filters: Dictionary of additional DICOM tags to use for filtering
         
         Returns:
             List of dictionaries, each representing a matched series with its attributes
-        
-        Example:
-            [
-                {
-                    "SeriesInstanceUID": "1.2.840.113619.2.1.1.322.1600364094.412.2005",
-                    "SeriesNumber": "2",
-                    "SeriesDescription": "AXIAL 2.5MM",
-                    "Modality": "CT",
-                    "NumberOfSeriesRelatedInstances": "120"
-                }
-            ]
         
         Raises:
             Exception: If there is an error communicating with the DICOM node
@@ -387,7 +343,8 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 series_description=series_description,
                 attribute_preset=attribute_preset,
                 additional_attrs=additional_attributes,
-                exclude_attrs=exclude_attributes
+                exclude_attrs=exclude_attributes,
+                additional_filters=additional_filters
             )
         except Exception as e:
             raise Exception(f"Error querying series: {str(e)}")
@@ -399,39 +356,23 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         sop_instance_uid: str = "",
         attribute_preset: str = "standard", 
         additional_attributes: List[str] = None,
-        exclude_attributes: List[str] = None, 
+        exclude_attributes: List[str] = None,
+        additional_filters: Dict[str, str] = None,
         ctx: Context = None 
     ) -> List[Dict[str, Any]]:
         """Query individual DICOM instances (images) within a series.
-        
-        This tool performs a DICOM C-FIND operation at the IMAGE level to find individual
-        DICOM instances within a specified series. The series_instance_uid is required,
-        and additional parameters can be used to filter the results.
         
         Args:
             series_instance_uid: Unique identifier for the series (required)
             instance_number: Filter by specific instance number within the series
             sop_instance_uid: Unique identifier for a specific instance
-            attribute_preset: Controls which attributes to include in results:
-                - "minimal": Only essential attributes
-                - "standard": Common attributes (default)
-                - "extended": All available attributes
+            attribute_preset: Controls which attributes to include in results
             additional_attributes: List of specific DICOM attributes to include beyond the preset
             exclude_attributes: List of DICOM attributes to exclude from the results
+            additional_filters: Dictionary of additional DICOM tags to use for filtering
         
         Returns:
             List of dictionaries, each representing a matched instance with its attributes
-        
-        Example:
-            [
-                {
-                    "SOPInstanceUID": "1.2.840.113619.2.1.1.322.1600364094.412.3001",
-                    "SOPClassUID": "1.2.840.10008.5.1.4.1.1.2",
-                    "InstanceNumber": "45",
-                    "ContentDate": "20230215",
-                    "ContentTime": "152245"
-                }
-            ]
         
         Raises:
             Exception: If there is an error communicating with the DICOM node
@@ -446,7 +387,8 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 instance_number=instance_number,
                 attribute_preset=attribute_preset,
                 additional_attrs=additional_attributes,
-                exclude_attrs=exclude_attributes
+                exclude_attrs=exclude_attributes,
+                additional_filters=additional_filters
             )
         except Exception as e:
             raise Exception(f"Error querying instances: {str(e)}")
@@ -459,42 +401,26 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
     ) -> Dict[str, Any]:
         """Move a DICOM series to another DICOM node.
         
-        This tool transfers a specific series from the current DICOM server to a 
-        destination DICOM node.
-        
         Args:
             destination_node: Name of the destination node as defined in the configuration
             series_instance_uid: The unique identifier for the series to be moved
         
         Returns:
-            Dictionary containing:
-            - success: Boolean indicating if the operation was successful
+            Dictionary containing:            - success: Boolean indicating if the operation was successful
             - message: Description of the operation result or error
             - completed: Number of successfully transferred instances
             - failed: Number of failed transfers
             - warning: Number of transfers with warnings
-        
-        Example:
-            {
-                "success": true,
-                "message": "C-MOVE operation completed successfully",
-                "completed": 120,
-                "failed": 0,
-                "warning": 0
-            }
         """
         dicom_ctx = ctx.request_context.lifespan_context
         config = dicom_ctx.config
         client = dicom_ctx.client
         
-        # Check if destination node exists
         if destination_node not in config.nodes:
             raise ValueError(f"Destination node '{destination_node}' not found in configuration")
         
-        # Get the destination AE title
         destination_ae = config.nodes[destination_node].ae_title
         
-        # Execute the move operation
         result = client.move_series(
             destination_ae=destination_ae,
             series_instance_uid=series_instance_uid
@@ -510,9 +436,6 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
     ) -> Dict[str, Any]:
         """Move a DICOM study to another DICOM node.
         
-        This tool transfers an entire study from the current DICOM server to a 
-        destination DICOM node.
-        
         Args:
             destination_node: Name of the destination node as defined in the configuration
             study_instance_uid: The unique identifier for the study to be moved
@@ -524,28 +447,16 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             - completed: Number of successfully transferred instances
             - failed: Number of failed transfers
             - warning: Number of transfers with warnings
-        
-        Example:
-            {
-                "success": true,
-                "message": "C-MOVE operation completed successfully",
-                "completed": 256,
-                "failed": 0,
-                "warning": 0
-            }
         """
         dicom_ctx = ctx.request_context.lifespan_context
         config = dicom_ctx.config
         client = dicom_ctx.client
         
-        # Check if destination node exists
         if destination_node not in config.nodes:
             raise ValueError(f"Destination node '{destination_node}' not found in configuration")
         
-        # Get the destination AE title
         destination_ae = config.nodes[destination_node].ae_title
         
-        # Execute the move operation
         result = client.move_study(
             destination_ae=destination_ae,
             study_instance_uid=study_instance_uid
@@ -553,6 +464,216 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         
         return result
 
+    @mcp.tool()
+    def retrieve_series_to_local(
+        series_instance_uid: str,
+        ctx: Context = None
+    ) -> Dict[str, Any]:
+        """Retrieve a DICOM series to the local server storage.
+        
+        This tool initiates a C-MOVE operation to retrieve a specific series
+        from the currently active DICOM node to the local storage directory
+        configured for this MCP server.
+        
+        Args:
+            series_instance_uid: The unique identifier for the series to be retrieved.
+        
+        Returns:
+            Dictionary containing the status of the C-MOVE operation.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+        client = dicom_ctx.client
+        
+        local_scp_node = config.nodes.get('local_scp')
+        if not local_scp_node:
+            raise ValueError("'local_scp' node not found or properly configured in configuration file.")
+        
+        result = client.move_series(
+            destination_ae=local_scp_node.ae_title,
+            series_instance_uid=series_instance_uid
+        )
+        
+        return result
+
+    @mcp.tool()
+    def retrieve_study_to_local(
+        study_instance_uid: str,
+        ctx: Context = None
+    ) -> Dict[str, Any]:
+        """Retrieve a DICOM study to the local server storage.
+        
+        This tool initiates a C-MOVE operation to retrieve an entire study
+        from the currently active DICOM node to the local storage directory
+        configured for this MCP server.
+        
+        Args:
+            study_instance_uid: The unique identifier for the study to be retrieved.
+        
+        Returns:
+            Dictionary containing the status of the C-MOVE operation.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+        client = dicom_ctx.client
+        
+        local_scp_node = config.nodes.get('local_scp')
+        if not local_scp_node:
+            raise ValueError("'local_scp' node not found or properly configured in configuration file.")
+        
+        result = client.move_study(
+            destination_ae=local_scp_node.ae_title,
+            study_instance_uid=study_instance_uid
+        )
+        
+        return result
+
+    @mcp.tool()
+    def get_local_instance_pixel_data(
+        sop_instance_uid: str,
+        ctx: Context = None
+    ) -> Dict[str, Any]:
+        """Gets pixel data from a locally stored DICOM instance.
+        
+        This tool retrieves pixel data metadata from a DICOM file that has been
+        previously retrieved and stored locally via a C-MOVE operation.
+        
+        Args:
+            sop_instance_uid: The SOP Instance UID of the instance to retrieve.
+            
+        Returns:
+            A dictionary containing pixel data metadata.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+        
+        filepath = Path(config.local_storage_dir) / (sop_instance_uid + ".dcm")
+        
+        if not filepath.is_file():
+            raise FileNotFoundError(f"DICOM file not found locally at {filepath}")
+        
+        try:
+            ds = pydicom.dcmread(str(filepath), force=True)
+            if not hasattr(ds, 'PixelData') or ds.PixelData is None:
+                raise ValueError("The DICOM instance does not contain pixel data.")
+            
+            pixel_array = ds.pixel_array
+            
+            preview = None
+            if pixel_array.ndim >= 2 and pixel_array.size > 0:
+                if pixel_array.ndim == 2:
+                    rows_preview = min(pixel_array.shape[0], 5)
+                    cols_preview = min(pixel_array.shape[1], 5)
+                    preview = pixel_array[:rows_preview, :cols_preview].tolist()
+                elif pixel_array.ndim == 3:
+                    if ds.get("SamplesPerPixel", 1) == 1:
+                         rows_preview = min(pixel_array.shape[1], 5)
+                         cols_preview = min(pixel_array.shape[2], 5)
+                         preview = pixel_array[0, :rows_preview, :cols_preview].tolist()
+                    elif ds.get("SamplesPerPixel", 1) > 1 and pixel_array.shape[-1] == ds.SamplesPerPixel:
+                         rows_preview = min(pixel_array.shape[0], 5)
+                         cols_preview = min(pixel_array.shape[1], 5)
+                         preview = pixel_array[:rows_preview, :cols_preview, 0].tolist()
+
+            return {
+                "sop_instance_uid": sop_instance_uid,
+                "rows": ds.Rows,
+                "columns": ds.Columns,
+                "pixel_array_shape": list(pixel_array.shape),
+                "pixel_array_dtype": str(pixel_array.dtype),
+                "pixel_array_preview": preview,
+                "message": "Pixel data accessed from locally stored file."
+            }
+        except Exception as e:
+            logger.error(f"Error processing local DICOM file {filepath}: {e}", exc_info=True)
+            raise
+
+    @mcp.tool()
+    def get_dicomweb_pixel_data(
+        study_instance_uid: str,
+        series_instance_uid: str,
+        sop_instance_uid: str,
+        ctx: Context = None
+    ) -> Dict[str, Any]:
+        """Retrieves pixel data from a DICOM instance via DICOMweb (WADO-RS).
+        
+        This tool constructs a WADO-RS URL and fetches the pixel data for a specific
+        DICOM instance directly from the configured DICOMweb server.
+        
+        Args:
+            study_instance_uid: The Study Instance UID of the instance.
+            series_instance_uid: The Series Instance UID of the instance.
+            sop_instance_uid: The SOP Instance UID of the instance.
+            
+        Returns:
+            A dictionary containing pixel data metadata and a preview.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+
+        if not config.dicomweb_url:
+            raise ValueError("DICOMweb URL is not configured. Please set 'dicomweb_url' in configuration.yaml")
+
+        # Construct WADO-RS URL for pixel data
+        # Example: /studies/{study}/series/{series}/instances/{instance}/frames/{frame}
+        # For single-frame images, frame is usually 1
+        dicomweb_url = (
+            f"{config.dicomweb_url}/studies/{study_instance_uid}/"
+            f"series/{series_instance_uid}/instances/{sop_instance_uid}/pixeldata"
+        )
+        
+        logger.info(f"Fetching pixel data from DICOMweb: {dicomweb_url}")
+
+        try:
+            # Use httpx to make the request
+            response = httpx.get(dicomweb_url, headers={"Accept": "application/dicom"})
+            response.raise_for_status() # Raise an exception for HTTP errors
+
+            # The response content is the DICOM file itself
+            dicom_bytes = response.content
+            
+            # Use pydicom to read the DICOM data from bytes
+            ds = pydicom.dcmread(pydicom.filebase.DicomBytesIO(dicom_bytes), force=True)
+
+            if not hasattr(ds, 'PixelData') or ds.PixelData is None:
+                raise ValueError("The DICOM instance retrieved via DICOMweb does not contain pixel data.")
+            
+            pixel_array = ds.pixel_array
+            
+            preview = None
+            if pixel_array.ndim >= 2 and pixel_array.size > 0:
+                if pixel_array.ndim == 2:
+                    rows_preview = min(pixel_array.shape[0], 5)
+                    cols_preview = min(pixel_array.shape[1], 5)
+                    preview = pixel_array[:rows_preview, :cols_preview].tolist()
+                elif pixel_array.ndim == 3:
+                    if ds.get("SamplesPerPixel", 1) == 1:
+                         rows_preview = min(pixel_array.shape[1], 5)
+                         cols_preview = min(pixel_array.shape[2], 5)
+                         preview = pixel_array[0, :rows_preview, :cols_preview].tolist()
+                    elif ds.get("SamplesPerPixel", 1) > 1 and pixel_array.shape[-1] == ds.SamplesPerPixel:
+                         rows_preview = min(pixel_array.shape[0], 5)
+                         cols_preview = min(pixel_array.shape[1], 5)
+                         preview = pixel_array[:rows_preview, :cols_preview, 0].tolist()
+
+            return {
+                "sop_instance_uid": sop_instance_uid,
+                "rows": ds.Rows,
+                "columns": ds.Columns,
+                "pixel_array_shape": list(pixel_array.shape),
+                "pixel_array_dtype": str(pixel_array.dtype),
+                "pixel_array_preview": preview,
+                "message": "Pixel data accessed via DICOMweb."
+            }
+        except httpx.HTTPStatusError as exc:
+            logger.error(f"HTTP error fetching DICOMweb pixel data: {exc.response.status_code} - {exc.response.text}")
+            raise ValueError(f"DICOMweb HTTP error: {exc.response.status_code} - {exc.response.text}")
+        except httpx.RequestError as exc:
+            logger.error(f"Network error fetching DICOMweb pixel data: {exc}")
+            raise ConnectionError(f"DICOMweb network error: {exc}")
+        except Exception as e:
+            logger.error(f"Error processing DICOMweb pixel data: {e}", exc_info=True)
+            raise
 
     @mcp.tool()
     def get_attribute_presets() -> Dict[str, Dict[str, List[str]]]:
@@ -566,21 +687,6 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             Dictionary organized by query level (patient, study, series, instance),
             with each level containing the attribute presets and their associated
             DICOM attributes.
-        
-        Example:
-            {
-                "patient": {
-                    "minimal": ["PatientID", "PatientName"],
-                    "standard": ["PatientID", "PatientName", "PatientBirthDate", "PatientSex"],
-                    "extended": ["PatientID", "PatientName", "PatientBirthDate", "PatientSex", ...]
-                },
-                "study": {
-                    "minimal": ["StudyInstanceUID", "StudyDate"],
-                    "standard": ["StudyInstanceUID", "StudyDate", "StudyDescription", ...],
-                    "extended": ["StudyInstanceUID", "StudyDate", "StudyDescription", ...]
-                },
-                ...
-            }
         """
         return ATTRIBUTE_PRESETS
     

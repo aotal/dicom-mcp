@@ -21,6 +21,8 @@ class DicomConfiguration(BaseModel):
     nodes: Dict[str, DicomNodeConfig]
     current_node: str
     calling_aet: str
+    local_storage_dir: str = "./dicom_received"
+    dicomweb_url: str
 
 def load_config(config_path: str) -> DicomConfiguration:
     """Load DICOM configuration from YAML file.
