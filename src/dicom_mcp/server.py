@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Any, AsyncIterator
 import httpx # Import httpx for DICOMweb operations
+from email.message import Message
+from email.parser import BytesParser
 
 from mcp.server.fastmcp import FastMCP, Context
 
@@ -55,7 +57,8 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         logger.info(f"DICOM client initialized: {config.current_node} (calling AE: {config.calling_aet})")
         
         # Start SCP server in a separate thread
-        def server_callback(server_instance):            global scp_server_instance
+        def server_callback(server_instance):
+            global scp_server_instance
             scp_server_instance = server_instance
 
         scp_thread = threading.Thread(
@@ -465,10 +468,90 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         return result
 
     @mcp.tool()
+    def move_instance(
+        destination_node: str,
+        study_instance_uid: str,
+        series_instance_uid: str,
+        sop_instance_uid: str,
+        ctx: Context = None
+    ) -> Dict[str, Any]:
+        """Move a specific DICOM instance to another DICOM node.
+        
+        Args:
+            destination_node: Name of the destination node as defined in the configuration
+            study_instance_uid: The Study Instance UID of the instance to be moved.
+            series_instance_uid: The Series Instance UID of the instance to be moved.
+            sop_instance_uid: The SOP Instance UID of the instance to be moved.
+        
+        Returns:
+            Dictionary containing:
+            - success: Boolean indicating if the operation was successful
+            - message: Description of the operation result or error
+            - completed: Number of successfully transferred instances
+            - failed: Number of failed transfers
+            - warning: Number of transfers with warnings
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+        client = dicom_ctx.client
+        
+        if destination_node not in config.nodes:
+            raise ValueError(f"Destination node '{destination_node}' not found in configuration")
+        
+        destination_ae = config.nodes[destination_node].ae_title
+        
+        result = client.move_instance(
+            destination_ae=destination_ae,
+            study_instance_uid=study_instance_uid,
+            series_instance_uid=series_instance_uid,
+            sop_instance_uid=sop_instance_uid
+        )
+        
+        return result
+
+    @mcp.tool()
+    def retrieve_instance_to_local(
+        study_instance_uid: str,
+        series_instance_uid: str,
+        sop_instance_uid: str,
+        ctx: Context = None
+    ) -> Dict[str, Any]:
+        """Retrieve a specific DICOM instance to the local server storage.
+        
+        This tool initiates a C-MOVE operation to retrieve a specific instance
+        from the currently active DICOM node to the local storage directory
+        configured for this MCP server.
+        
+        Args:
+            study_instance_uid: The Study Instance UID of the instance to be retrieved.
+            series_instance_uid: The Series Instance UID of the instance to be retrieved.
+            sop_instance_uid: The SOP Instance UID of the instance to be retrieved.
+        
+        Returns:
+            Dictionary containing the status of the C-MOVE operation.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+        client = dicom_ctx.client
+        
+        local_scp_node = config.nodes.get('local_scp')
+        if not local_scp_node:
+            raise ValueError("'local_scp' node not found or properly configured in configuration file.")
+        
+        result = client.move_instance(
+            destination_ae=local_scp_node.ae_title,
+            study_instance_uid=study_instance_uid,
+            series_instance_uid=series_instance_uid,
+            sop_instance_uid=sop_instance_uid
+        )
+        
+        return result
+
+    @mcp.tool()
     def retrieve_series_to_local(
         series_instance_uid: str,
         ctx: Context = None
-    ) -> Dict[str, Any]:
+        ) -> Dict[str, Any]:
         """Retrieve a DICOM series to the local server storage.
         
         This tool initiates a C-MOVE operation to retrieve a specific series
@@ -589,7 +672,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             raise
 
     @mcp.tool()
-    def get_dicomweb_pixel_data(
+    async def get_dicomweb_pixel_data(
         study_instance_uid: str,
         series_instance_uid: str,
         sop_instance_uid: str,
@@ -619,21 +702,36 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         # For single-frame images, frame is usually 1
         dicomweb_url = (
             f"{config.dicomweb_url}/studies/{study_instance_uid}/"
-            f"series/{series_instance_uid}/instances/{sop_instance_uid}/pixeldata"
+            f"series/{series_instance_uid}/instances/{sop_instance_uid}"
         )
         
-        logger.info(f"Fetching pixel data from DICOMweb: {dicomweb_url}")
+        logger.info(f"Fetching DICOM instance from DICOMweb: {dicomweb_url}")
 
         try:
-            # Use httpx to make the request
-            response = httpx.get(dicomweb_url, headers={"Accept": "application/dicom"})
-            response.raise_for_status() # Raise an exception for HTTP errors
+            # Use httpx to make the request for the full DICOM instance
+            async with httpx.AsyncClient() as client:
+                response = await client.get(dicomweb_url, headers={"Accept": 'multipart/related; type="application/dicom"'}, timeout=30.0)
+                response.raise_for_status() # Raise an exception for HTTP errors
 
-            # The response content is the DICOM file itself
-            dicom_bytes = response.content
-            
-            # Use pydicom to read the DICOM data from bytes
-            ds = pydicom.dcmread(pydicom.filebase.DicomBytesIO(dicom_bytes), force=True)
+                # Parse multipart/related response
+                msg = Message()
+                msg['Content-Type'] = response.headers['Content-Type']
+                
+                # Use BytesParser to parse the raw bytes content
+                parser = BytesParser()
+                parsed_msg = parser.parsebytes(b'Content-Type: ' + response.headers['Content-Type'].encode() + b'\r\n\r\n' + response.content)
+
+                dicom_bytes = None
+                for part in parsed_msg.walk():
+                    if part.get_content_type() == 'application/dicom':
+                        dicom_bytes = part.get_payload(decode=True)
+                        break
+                
+                if dicom_bytes is None:
+                    raise ValueError("No application/dicom part found in multipart/related response.")
+
+                # Use pydicom to read the DICOM data from bytes
+                ds = pydicom.dcmread(pydicom.filebase.DicomBytesIO(dicom_bytes), force=True)
 
             if not hasattr(ds, 'PixelData') or ds.PixelData is None:
                 raise ValueError("The DICOM instance retrieved via DICOMweb does not contain pixel data.")
@@ -690,4 +788,434 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         """
         return ATTRIBUTE_PRESETS
     
+    FASTAPI_ATTRIBUTE_SETS = {
+        "QC_Convencional": [
+            "00180060",  # KVP
+            "00181151",  # XRayTubeCurrent
+            "00181153",  # ExposureInuAs
+            "00204000"   # ImageComments
+        ],
+        "InfoPacienteEstudio": [
+            "00100010", # PatientName
+            "00081030", # StudyDescription
+            "00080090"  # ReferringPhysicianName
+        ]
+    }
+
+    @mcp.tool()
+    async def qido_proxy_query(
+        query_level: str, # e.g., "studies", "series", "instances"
+        query_params: Dict[str, Any] = None,
+        ctx: Context = None
+    ) -> List[Dict[str, Any]]:
+        """Proxies a QIDO-RS query to the configured DICOMweb server.
+
+        This tool allows querying studies, series, or instances on the DICOMweb server
+        using QIDO-RS. It supports attribute set expansion similar to the FastAPI gateway.
+
+        Args:
+            query_level: The level of the query (e.g., "studies", "series", "instances").
+                         Can also include UIDs like "studies/{study_uid}/series".
+            query_params: A dictionary of query parameters for the QIDO-RS request.
+                          Supports 'includefield' expansion using predefined attribute sets.
+
+        Returns:
+            A list of dictionaries, each representing a matched DICOM resource.
+
+        Raises:
+            ValueError: If DICOMweb URL is not configured or query_level is invalid.
+            httpx.HTTPStatusError: If the DICOMweb server returns an HTTP error.
+            httpx.RequestError: If there's a network error connecting to the DICOMweb server.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+
+        if not config.dicomweb_url:
+            raise ValueError("DICOMweb URL is not configured. Please set 'dicomweb_url' in configuration.yaml")
+
+        base_url = config.dicomweb_url.rstrip('/') # Ensure no trailing slash
+
+        # Construct the full QIDO-RS URL
+        # Handle cases like "studies" or "studies/{study_uid}/series"
+        if query_level.startswith("studies/") or query_level in ["studies", "series", "instances"]:
+            qido_url = f"{base_url}/{query_level}"
+        else:
+            raise ValueError(f"Invalid query_level: {query_level}. Must be 'studies', 'series', 'instances' or follow 'studies/{{uid}}/series' pattern.")
+
+        # Prepare query parameters, expanding includefield if present
+        processed_params = query_params.copy() if query_params else {}
+        if 'includefield' in processed_params:
+            expanded_fields = []
+            fields_to_check = processed_params['includefield'].split(',')
+            for field in fields_to_check:
+                field = field.strip()
+                if field in FASTAPI_ATTRIBUTE_SETS:
+                    expanded_fields.extend(FASTAPI_ATTRIBUTE_SETS[field])
+                else:
+                    expanded_fields.append(field)
+            processed_params['includefield'] = ",".join(expanded_fields)
+
+        logger.info(f"Proxying QIDO-RS query to: {qido_url} with params: {processed_params}")
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    qido_url,
+                    params=processed_params,
+                    headers={"Accept": "application/dicom+json"},
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+                raise ValueError(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+            except httpx.RequestError as exc:
+                logger.error(f"Network error during DICOMweb QIDO-RS query: {exc}")
+                raise ConnectionError(f"DICOMweb QIDO-RS network error: {exc}")
+
+    FASTAPI_ATTRIBUTE_SETS = {
+        "QC_Convencional": [
+            "00180060",  # KVP
+            "00181151",  # XRayTubeCurrent
+            "00181153",  # ExposureInuAs
+            "00204000"   # ImageComments
+        ],
+        "InfoPacienteEstudio": [
+            "00100010", # PatientName
+            "00081030", # StudyDescription
+            "00080090"  # ReferringPhysicianName
+        ]
+    }
+
+    @mcp.tool()
+    async def qido_proxy_query(
+        query_level: str, # e.g., "studies", "series", "instances"
+        query_params: Dict[str, Any] = None,
+        ctx: Context = None
+    ) -> List[Dict[str, Any]]:
+        """Proxies a QIDO-RS query to the configured DICOMweb server.
+
+        This tool allows querying studies, series, or instances on the DICOMweb server
+        using QIDO-RS. It supports attribute set expansion similar to the FastAPI gateway.
+
+        Args:
+            query_level: The level of the query (e.g., "studies", "series", "instances").
+                         Can also include UIDs like "studies/{study_uid}/series".
+            query_params: A dictionary of query parameters for the QIDO-RS request.
+                          Supports 'includefield' expansion using predefined attribute sets.
+
+        Returns:
+            A list of dictionaries, each representing a matched DICOM resource.
+
+        Raises:
+            ValueError: If DICOMweb URL is not configured or query_level is invalid.
+            httpx.HTTPStatusError: If the DICOMweb server returns an HTTP error.
+            httpx.RequestError: If there's a network error connecting to the DICOMweb server.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+
+        if not config.dicomweb_url:
+            raise ValueError("DICOMweb URL is not configured. Please set 'dicomweb_url' in configuration.yaml")
+
+        base_url = config.dicomweb_url.rstrip('/') # Ensure no trailing slash
+
+        # Construct the full QIDO-RS URL
+        # Handle cases like "studies" or "studies/{study_uid}/series"
+        if query_level.startswith("studies/") or query_level in ["studies", "series", "instances"]:
+            qido_url = f"{base_url}/{query_level}"
+        else:
+            raise ValueError(f"Invalid query_level: {query_level}. Must be 'studies', 'series', 'instances' or follow 'studies/{{uid}}/series' pattern.")
+
+        # Prepare query parameters, expanding includefield if present
+        processed_params = query_params.copy() if query_params else {}
+        if 'includefield' in processed_params:
+            expanded_fields = []
+            fields_to_check = processed_params['includefield'].split(',')
+            for field in fields_to_check:
+                field = field.strip()
+                if field in FASTAPI_ATTRIBUTE_SETS:
+                    expanded_fields.extend(FASTAPI_ATTRIBUTE_SETS[field])
+                else:
+                    expanded_fields.append(field)
+            processed_params['includefield'] = ",".join(expanded_fields)
+
+        logger.info(f"Proxying QIDO-RS query to: {qido_url} with params: {processed_params}")
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    qido_url,
+                    params=processed_params,
+                    headers={"Accept": "application/dicom+json"},
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+                raise ValueError(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+            except httpx.RequestError as exc:
+                logger.error(f"Network error during DICOMweb QIDO-RS query: {exc}")
+                raise ConnectionError(f"DICOMweb QIDO-RS network error: {exc}")
+
+    FASTAPI_ATTRIBUTE_SETS = {
+        "QC_Convencional": [
+            "00180060",  # KVP
+            "00181151",  # XRayTubeCurrent
+            "00181153",  # ExposureInuAs
+            "00204000"   # ImageComments
+        ],
+        "InfoPacienteEstudio": [
+            "00100010", # PatientName
+            "00081030", # StudyDescription
+            "00080090"  # ReferringPhysicianName
+        ]
+    }
+
+    @mcp.tool()
+    async def qido_proxy_query(
+        query_level: str, # e.g., "studies", "series", "instances"
+        query_params: Dict[str, Any] = None,
+        ctx: Context = None
+    ) -> List[Dict[str, Any]]:
+        """Proxies a QIDO-RS query to the configured DICOMweb server.
+
+        This tool allows querying studies, series, or instances on the DICOMweb server
+        using QIDO-RS. It supports attribute set expansion similar to the FastAPI gateway.
+
+        Args:
+            query_level: The level of the query (e.g., "studies", "series", "instances").
+                         Can also include UIDs like "studies/{study_uid}/series".
+            query_params: A dictionary of query parameters for the QIDO-RS request.
+                          Supports 'includefield' expansion using predefined attribute sets.
+
+        Returns:
+            A list of dictionaries, each representing a matched DICOM resource.
+
+        Raises:
+            ValueError: If DICOMweb URL is not configured or query_level is invalid.
+            httpx.HTTPStatusError: If the DICOMweb server returns an HTTP error.
+            httpx.RequestError: If there's a network error connecting to the DICOMweb server.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+
+        if not config.dicomweb_url:
+            raise ValueError("DICOMweb URL is not configured. Please set 'dicomweb_url' in configuration.yaml")
+
+        base_url = config.dicomweb_url.rstrip('/') # Ensure no trailing slash
+
+        # Construct the full QIDO-RS URL
+        # Handle cases like "studies" or "studies/{study_uid}/series"
+        if query_level.startswith("studies/") or query_level in ["studies", "series", "instances"]:
+            qido_url = f"{base_url}/{query_level}"
+        else:
+            raise ValueError(f"Invalid query_level: {query_level}. Must be 'studies', 'series', 'instances' or follow 'studies/{{uid}}/series' pattern.")
+
+        # Prepare query parameters, expanding includefield if present
+        processed_params = query_params.copy() if query_params else {}
+        if 'includefield' in processed_params:
+            expanded_fields = []
+            fields_to_check = processed_params['includefield'].split(',')
+            for field in fields_to_check:
+                field = field.strip()
+                if field in FASTAPI_ATTRIBUTE_SETS:
+                    expanded_fields.extend(FASTAPI_ATTRIBUTE_SETS[field])
+                else:
+                    expanded_fields.append(field)
+            processed_params['includefield'] = ",".join(expanded_fields)
+
+        logger.info(f"Proxying QIDO-RS query to: {qido_url} with params: {processed_params}")
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    qido_url,
+                    params=processed_params,
+                    headers={"Accept": "application/dicom+json"},
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+                raise ValueError(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+            except httpx.RequestError as exc:
+                logger.error(f"Network error during DICOMweb QIDO-RS query: {exc}")
+                raise ConnectionError(f"DICOMweb QIDO-RS network error: {exc}")
+
+    FASTAPI_ATTRIBUTE_SETS = {
+        "QC_Convencional": [
+            "00180060",  # KVP
+            "00181151",  # XRayTubeCurrent
+            "00181153",  # ExposureInuAs
+            "00204000"   # ImageComments
+        ],
+        "InfoPacienteEstudio": [
+            "00100010", # PatientName
+            "00081030", # StudyDescription
+            "00080090"  # ReferringPhysicianName
+        ]
+    }
+
+    @mcp.tool()
+    async def qido_proxy_query(
+        query_level: str, # e.g., "studies", "series", "instances"
+        query_params: Dict[str, Any] = None,
+        ctx: Context = None
+    ) -> List[Dict[str, Any]]:
+        """Proxies a QIDO-RS query to the configured DICOMweb server.
+
+        This tool allows querying studies, series, or instances on the DICOMweb server
+        using QIDO-RS. It supports attribute set expansion similar to the FastAPI gateway.
+
+        Args:
+            query_level: The level of the query (e.g., "studies", "series", "instances").
+                         Can also include UIDs like "studies/{study_uid}/series".
+            query_params: A dictionary of query parameters for the QIDO-RS request.
+                          Supports 'includefield' expansion using predefined attribute sets.
+
+        Returns:
+            A list of dictionaries, each representing a matched DICOM resource.
+
+        Raises:
+            ValueError: If DICOMweb URL is not configured or query_level is invalid.
+            httpx.HTTPStatusError: If the DICOMweb server returns an HTTP error.
+            httpx.RequestError: If there's a network error connecting to the DICOMweb server.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+
+        if not config.dicomweb_url:
+            raise ValueError("DICOMweb URL is not configured. Please set 'dicomweb_url' in configuration.yaml")
+
+        base_url = config.dicomweb_url.rstrip('/') # Ensure no trailing slash
+
+        # Construct the full QIDO-RS URL
+        # Handle cases like "studies" or "studies/{study_uid}/series"
+        if query_level.startswith("studies/") or query_level in ["studies", "series", "instances"]:
+            qido_url = f"{base_url}/{query_level}"
+        else:
+            raise ValueError(f"Invalid query_level: {query_level}. Must be 'studies', 'series', 'instances' or follow 'studies/{{uid}}/series' pattern.")
+
+        # Prepare query parameters, expanding includefield if present
+        processed_params = query_params.copy() if query_params else {}
+        if 'includefield' in processed_params:
+            expanded_fields = []
+            fields_to_check = processed_params['includefield'].split(',')
+            for field in fields_to_check:
+                field = field.strip()
+                if field in FASTAPI_ATTRIBUTE_SETS:
+                    expanded_fields.extend(FASTAPI_ATTRIBUTE_SETS[field])
+                else:
+                    expanded_fields.append(field)
+            processed_params['includefield'] = ",".join(expanded_fields)
+
+        logger.info(f"Proxying QIDO-RS query to: {qido_url} with params: {processed_params}")
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    qido_url,
+                    params=processed_params,
+                    headers={"Accept": "application/dicom+json"},
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+                raise ValueError(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+            except httpx.RequestError as exc:
+                logger.error(f"Network error during DICOMweb QIDO-RS query: {exc}")
+                raise ConnectionError(f"DICOMweb QIDO-RS network error: {exc}")
+
+    FASTAPI_ATTRIBUTE_SETS = {
+        "QC_Convencional": [
+            "00180060",  # KVP
+            "00181151",  # XRayTubeCurrent
+            "00181153",  # ExposureInuAs
+            "00204000"   # ImageComments
+        ],
+        "InfoPacienteEstudio": [
+            "00100010", # PatientName
+            "00081030", # StudyDescription
+            "00080090"  # ReferringPhysicianName
+        ]
+    }
+
+    @mcp.tool()
+    async def qido_proxy_query(
+        query_level: str, # e.g., "studies", "series", "instances"
+        query_params: Dict[str, Any] = None,
+        ctx: Context = None
+    ) -> List[Dict[str, Any]]:
+        """Proxies a QIDO-RS query to the configured DICOMweb server.
+
+        This tool allows querying studies, series, or instances on the DICOMweb server
+        using QIDO-RS. It supports attribute set expansion similar to the FastAPI gateway.
+
+        Args:
+            query_level: The level of the query (e.g., "studies", "series", "instances").
+                         Can also include UIDs like "studies/{study_uid}/series".
+            query_params: A dictionary of query parameters for the QIDO-RS request.
+                          Supports 'includefield' expansion using predefined attribute sets.
+
+        Returns:
+            A list of dictionaries, each representing a matched DICOM resource.
+
+        Raises:
+            ValueError: If DICOMweb URL is not configured or query_level is invalid.
+            httpx.HTTPStatusError: If the DICOMweb server returns an HTTP error.
+            httpx.RequestError: If there's a network error connecting to the DICOMweb server.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
+
+        if not config.dicomweb_url:
+            raise ValueError("DICOMweb URL is not configured. Please set 'dicomweb_url' in configuration.yaml")
+
+        base_url = config.dicomweb_url.rstrip('/') # Ensure no trailing slash
+
+        # Construct the full QIDO-RS URL
+        # Handle cases like "studies" or "studies/{study_uid}/series"
+        if query_level.startswith("studies/") or query_level in ["studies", "series", "instances"]:
+            qido_url = f"{base_url}/{query_level}"
+        else:
+            raise ValueError(f"Invalid query_level: {query_level}. Must be 'studies', 'series', 'instances' or follow 'studies/{{uid}}/series' pattern.")
+
+        # Prepare query parameters, expanding includefield if present
+        processed_params = query_params.copy() if query_params else {}
+        if 'includefield' in processed_params:
+            expanded_fields = []
+            fields_to_check = processed_params['includefield'].split(',')
+            for field in fields_to_check:
+                field = field.strip()
+                if field in FASTAPI_ATTRIBUTE_SETS:
+                    expanded_fields.extend(FASTAPI_ATTRIBUTE_SETS[field])
+                else:
+                    expanded_fields.append(field)
+            processed_params['includefield'] = ",".join(expanded_fields)
+
+        logger.info(f"Proxying QIDO-RS query to: {qido_url} with params: {processed_params}")
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    qido_url,
+                    params=processed_params,
+                    headers={"Accept": "application/dicom+json"},
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+                raise ValueError(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+            except httpx.RequestError as exc:
+                logger.error(f"Network error during DICOMweb QIDO-RS query: {exc}")
+                raise ConnectionError(f"DICOMweb QIDO-RS network error: {exc}")
+
     return mcp
