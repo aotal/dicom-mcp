@@ -43,12 +43,14 @@ ATTRIBUTE_PRESETS = {
         "study": [
             "StudyInstanceUID",
             "PatientID",
+            "PatientName",
             "StudyDate",
             "StudyTime",
             "StudyDescription",
             "AccessionNumber",
             "ReferringPhysicianName",
             "StudyID",
+            "ModalitiesInStudy",
             "NumberOfStudyRelatedSeries",
             "NumberOfStudyRelatedInstances",
         ],
@@ -60,6 +62,7 @@ ATTRIBUTE_PRESETS = {
             "SeriesDescription",
             "BodyPartExamined",
             "PatientPosition",
+            "PatientName",
             "NumberOfSeriesRelatedInstances",
         ],
         "instance": [
@@ -70,7 +73,6 @@ ATTRIBUTE_PRESETS = {
             "ContentDate",
             "ContentTime",
             "ImageType",
-            "NumberOfFrames",
         ],
     },
     
@@ -135,7 +137,6 @@ ATTRIBUTE_PRESETS = {
             "AcquisitionDate",
             "AcquisitionTime",
             "ImageComments",
-            "NumberOfFrames",
             "BurnedInAnnotation",
             "WindowCenter",
             "WindowWidth",

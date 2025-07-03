@@ -6,10 +6,12 @@ import logging
 import threading
 import pydicom
 from pydicom.datadict import keyword_for_tag
+import numpy as np
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Any, AsyncIterator
+from .models import PixelDataResponse, DicomNodeInfo, DicomNodeListResponse, OperationStatusResponse, ConnectionVerificationResponse, PatientQueryResult, StudyResponse, SeriesResponse, AttributePresetDetails, AttributePresetsResponse, QidoResponse
 import httpx # Import httpx for DICOMweb operations
 from email.message import Message
 from email.parser import BytesParser
@@ -58,38 +60,28 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         logger.info(f"DICOM client initialized: {config.current_node} (calling AE: {config.calling_aet})")
         
         # Start SCP server in a separate thread
-        def server_callback(server_instance):
-            global scp_server_instance
-            scp_server_instance = server_instance
+        # def server_callback(server_instance):
+        #     global scp_server_instance
+        #     scp_server_instance = server_instance
 
-        scp_thread = threading.Thread(
-            target=start_scp_server,
-            args=(config, server_callback,),
-            daemon=True
-        )
-        scp_thread.start()
+        # scp_thread = threading.Thread(
+        #     target=start_scp_server,
+        #     args=(config, server_callback,),
+        #     daemon=True
+        # )
+        # scp_thread.start()
         
         try:
             yield DicomContext(config=config, client=client)
         finally:
-            logger.info("Shutting down DICOM MCP server...")
-            if scp_server_instance:
-                logger.info("Requesting SCP server shutdown...")
-                scp_server_instance.shutdown()
-            
-            if scp_thread and scp_thread.is_alive():
-                logger.info("Waiting for SCP thread to finish...")
-                scp_thread.join(timeout=5.0)
-                if scp_thread.is_alive():
-                    logger.warning("Warning: SCP server thread did not terminate cleanly.")
-            logger.info("Shutdown complete.")
+            pass
     
     # Create server
     mcp = FastMCP(name, lifespan=lifespan)
     
     # Register tools
     @mcp.tool()
-    def list_dicom_nodes(ctx: Context = None) -> Dict[str, Any]:
+    def list_dicom_nodes(ctx: Context = None) -> DicomNodeListResponse:
         """List all configured DICOM nodes and their connection information.
         
         This tool returns information about all configured DICOM nodes in the system
@@ -111,16 +103,16 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         config = dicom_ctx.config
         
         current_node =  config.current_node
-        nodes = [{node_name: node.description} for node_name, node in config.nodes.items()]
+        nodes = [DicomNodeInfo(name=node_name, description=node.description) for node_name, node in config.nodes.items()]
 
-        return {
-            "current_node": current_node,
-            "nodes": nodes,
-        }
+        return DicomNodeListResponse(
+            current_node=current_node,
+            nodes=nodes,
+        )
     
 
     @mcp.tool()
-    def switch_dicom_node(node_name: str, ctx: Context = None) -> Dict[str, Any]:
+    def switch_dicom_node(node_name: str, ctx: Context = None) -> OperationStatusResponse:
         """Switch the active DICOM node connection to a different configured node.
         
         This tool changes which DICOM node (PACS, workstation, etc.) subsequent operations
@@ -164,13 +156,13 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             called_aet=current_node.ae_title
         )
         
-        return {
-            "success": True,
-            "message": f"Switched to DICOM node: {node_name}"
-        }
+        return OperationStatusResponse(
+            success=True,
+            message=f"Switched to DICOM node: {node_name}"
+        )
 
     @mcp.tool()
-    def verify_connection(ctx: Context = None) -> str:
+    def verify_connection(ctx: Context = None) -> ConnectionVerificationResponse:
         """Verify connectivity to the current DICOM node using C-ECHO.
         
         This tool performs a DICOM C-ECHO operation (similar to a network ping) to check
@@ -187,7 +179,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         client = dicom_ctx.client
         
         success, message = client.verify_connection()
-        return message
+        return ConnectionVerificationResponse(message=message)
 
     @mcp.tool()
     def query_patients(
@@ -199,7 +191,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         exclude_attributes: List[str] = [],
         additional_filters: Dict[str, str] = {},
         ctx: Context = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[PatientQueryResult]:
         """Query patients matching the specified criteria from the DICOM node.
         
         This tool performs a DICOM C-FIND operation at the PATIENT level to find patients
@@ -221,16 +213,6 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         Returns:
             List of dictionaries, each representing a matched patient with their attributes
         
-        Example:
-            [
-                {
-                    "PatientID": "12345",
-                    "PatientName": "SMITH^JOHN",
-                    "PatientBirthDate": "19700101",
-                    "PatientSex": "M"
-                }
-            ]
-        
         Raises:
             Exception: If there is an error communicating with the DICOM node
         """
@@ -238,7 +220,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         client = dicom_ctx.client
         
         try:
-            return client.query_patient(
+            results = client.query_patient(
                 patient_id=patient_id,
                 name_pattern=name_pattern,
                 birth_date=birth_date,
@@ -247,6 +229,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 exclude_attrs=exclude_attributes,
                 additional_filters=additional_filters
             )
+            return [PatientQueryResult(**r) for r in results]
         except Exception as e:
             raise Exception(f"Error querying patients: {str(e)}")
 
@@ -263,7 +246,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         exclude_attributes: List[str] = [],
         additional_filters: Dict[str, str] = {},
         ctx: Context = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[StudyResponse]:
         """Query studies matching the specified criteria from the DICOM node.
         
         Args:
@@ -288,7 +271,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         client = dicom_ctx.client
         
         try:
-            return client.query_study(
+            results = client.query_study(
                 patient_id=patient_id,
                 study_date=study_date,
                 modality=modality_in_study,
@@ -300,6 +283,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 exclude_attrs=exclude_attributes,
                 additional_filters=additional_filters
             )
+            return [StudyResponse(**r) for r in results]
         except Exception as e:
             raise Exception(f"Error querying studies: {str(e)}")
 
@@ -315,7 +299,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         exclude_attributes: List[str] = [],
         additional_filters: Dict[str, str] = {},
         ctx: Context = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[SeriesResponse]:
         """Query series within a study from the DICOM node.
         
         Args:
@@ -339,7 +323,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         client = dicom_ctx.client
         
         try:
-            return client.query_series(
+            results = client.query_series(
                 study_instance_uid=study_instance_uid,
                 series_instance_uid=series_instance_uid,
                 modality=modality,
@@ -350,6 +334,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 exclude_attrs=exclude_attributes,
                 additional_filters=additional_filters
             )
+            return [SeriesResponse(**r) for r in results]
         except Exception as e:
             raise Exception(f"Error querying series: {str(e)}")
 
@@ -361,7 +346,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         series_instance_uid: str,
         sop_instance_uid: str,
         ctx: Context = None
-    ) -> Dict[str, Any]:
+    ) -> PixelDataResponse:
         """Retrieves pixel data from a DICOM instance via DICOMweb (WADO-RS).
         
         This tool constructs a WADO-RS URL and fetches the pixel data for a specific
@@ -417,36 +402,12 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 # Use pydicom to read the DICOM data from bytes
                 ds = pydicom.dcmread(pydicom.filebase.DicomBytesIO(dicom_bytes), force=True)
 
-            if not hasattr(ds, 'PixelData') or ds.PixelData is None:
-                raise ValueError("The DICOM instance retrieved via DICOMweb does not contain pixel data.")
-            
-            pixel_array = ds.pixel_array
-            
-            preview = None
-            if pixel_array.ndim >= 2 and pixel_array.size > 0:
-                if pixel_array.ndim == 2:
-                    rows_preview = min(pixel_array.shape[0], 5)
-                    cols_preview = min(pixel_array.shape[1], 5)
-                    preview = pixel_array[:rows_preview, :cols_preview].tolist()
-                elif pixel_array.ndim == 3:
-                    if ds.get("SamplesPerPixel", 1) == 1:
-                         rows_preview = min(pixel_array.shape[1], 5)
-                         cols_preview = min(pixel_array.shape[2], 5)
-                         preview = pixel_array[0, :rows_preview, :cols_preview].tolist()
-                    elif ds.get("SamplesPerPixel", 1) > 1 and pixel_array.shape[-1] == ds.SamplesPerPixel:
-                         rows_preview = min(pixel_array.shape[0], 5)
-                         cols_preview = min(pixel_array.shape[1], 5)
-                         preview = pixel_array[:rows_preview, :cols_preview, 0].tolist()
+            pixel_info = _extract_pixel_array_info(ds)
 
-            return {
-                "sop_instance_uid": sop_instance_uid,
-                "rows": ds.Rows,
-                "columns": ds.Columns,
-                "pixel_array_shape": list(pixel_array.shape),
-                "pixel_array_dtype": str(pixel_array.dtype),
-                "pixel_array_preview": preview,
-                "message": "Pixel data accessed via DICOMweb."
-            }
+            return PixelDataResponse(
+                sop_instance_uid=sop_instance_uid,
+                **pixel_info
+            )
         except httpx.HTTPStatusError as exc:
             logger.error(f"HTTP error fetching DICOMweb pixel data: {exc.response.status_code} - {exc.response.text}")
             raise ValueError(f"DICOMweb HTTP error: {exc.response.status_code} - {exc.response.text}")
@@ -458,7 +419,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             raise
 
     @mcp.tool()
-    def get_attribute_presets() -> Dict[str, Dict[str, List[str]]]:
+    def get_attribute_presets() -> AttributePresetsResponse:
         """Get all available attribute presets for DICOM queries.
         
         This tool returns the defined attribute presets that can be used with the
@@ -470,7 +431,20 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             with each level containing the attribute presets and their associated
             DICOM attributes.
         """
-        return ATTRIBUTE_PRESETS
+        
+        presets_by_level = {}
+        for level in ["patient", "study", "series", "instance"]:
+            presets_by_level[level] = {
+                preset: ATTRIBUTE_PRESETS[preset][level]
+                for preset in ["minimal", "standard", "extended"]
+            }
+
+        return AttributePresetsResponse(
+            patient=AttributePresetDetails(**presets_by_level["patient"]),
+            study=AttributePresetDetails(**presets_by_level["study"]),
+            series=AttributePresetDetails(**presets_by_level["series"]),
+            instance=AttributePresetDetails(**presets_by_level["instance"])
+        )
 
 
 
@@ -493,7 +467,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         query_level: str, # e.g., "studies", "series", "instances"
         query_params: Dict[str, Any] = None,
         ctx: Context = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[QidoResponse]:
         """Realiza una consulta QIDO-RS al servidor DICOMweb configurado.
 
         Esta herramienta permite consultar estudios, series o instancias en el servidor DICOMweb
@@ -553,7 +527,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                     timeout=30.0
                 )
                 response.raise_for_status()
-                return _process_dicom_json_output(response.json())
+                return [QidoResponse(**r) for r in _process_dicom_json_output(response.json())]
             except httpx.HTTPStatusError as exc:
                 logger.error(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
                 raise ValueError(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
@@ -589,23 +563,115 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                     # Si la palabra clave existe, usarla; de lo contrario, usar el tag hexadecimal
                     display_key = keyword if keyword else tag_hex
 
-                    # Extraer el valor. Si 'Value' es una lista con un solo elemento, tomar ese elemento.
-                    # Si es una lista con múltiples elementos, mantener la lista.
-                    # Si no hay 'Value' o es nulo, usar None.
-                    value = details.get("Value")
-                    if isinstance(value, list):
-                        if len(value) == 1:
-                            processed_object[display_key] = value[0]
+                    # Manejar secuencias (VR = SQ)
+                    if details.get("vr") == "SQ":
+                        sequence_items = []
+                        if "Value" in details and isinstance(details["Value"], list):
+                            for item_dict in details["Value"]:
+                                # Llamada recursiva para procesar cada ítem de la secuencia
+                                sequence_items.append(_process_dicom_json_output([item_dict])[0])
+                        processed_object[display_key] = sequence_items
+                    else:
+                        # Extraer el valor. Si 'Value' es una lista con un solo elemento, tomar ese elemento.
+                        # Si es una lista con múltiples elementos, mantener la lista.
+                        # Si no hay 'Value' o es nulo, usar None.
+                        value = details.get("Value")
+                        if isinstance(value, list):
+                            if len(value) == 1:
+                                processed_object[display_key] = value[0]
+                            else:
+                                processed_object[display_key] = value
                         else:
                             processed_object[display_key] = value
-                    else:
-                        processed_object[display_key] = value
                         
                 except Exception as e:
                     # En caso de error (ej. tag_hex inválido), mantener el tag original y el valor crudo
                     processed_object[tag_hex] = details
                     logger.warning(f"No se pudo procesar el tag DICOM {tag_hex}: {e}")
+            if "NumberOfFrames" in processed_object:
+                del processed_object["NumberOfFrames"]
             processed_results.append(processed_object)
         return processed_results
+
+    def _fetch_dicom_dataset(
+        dicomweb_url: str,
+        study_instance_uid: str,
+        series_instance_uid: str,
+        sop_instance_uid: str
+    ) -> pydicom.Dataset:
+        """
+        Obtiene el dataset DICOM completo de una instancia a través de DICOMweb (WADO-RS).
+        """
+        full_dicomweb_url = (
+            f"{dicomweb_url}/studies/{study_instance_uid}/"
+            f"series/{series_instance_uid}/instances/{sop_instance_uid}"
+        )
+        logger.info(f"Fetching DICOM dataset from DICOMweb: {full_dicomweb_url}")
+
+        try:
+            with httpx.Client() as client: # Usar httpx.Client para llamadas síncronas si la herramienta es síncrona
+                response = client.get(full_dicomweb_url, headers={"Accept": 'multipart/related; type="application/dicom"'}, timeout=30.0)
+                response.raise_for_status()
+
+                msg = Message()
+                msg['Content-Type'] = response.headers['Content-Type']
+                parser = BytesParser()
+                parsed_msg = parser.parsebytes(b'Content-Type: ' + response.headers['Content-Type'].encode() + b'\n\n' + response.content)
+
+                dicom_bytes = None
+                for part in parsed_msg.walk():
+                    if part.get_content_type() == 'application/dicom':
+                        dicom_bytes = part.get_payload(decode=True)
+                        break
+                
+                if dicom_bytes is None:
+                    raise ValueError("No application/dicom part found in multipart/related response.")
+
+                return pydicom.dcmread(pydicom.filebase.DicomBytesIO(dicom_bytes), force=True)
+        except httpx.HTTPStatusError as exc:
+            logger.error(f"HTTP error fetching DICOM dataset: {exc.response.status_code} - {exc.response.text}")
+            raise ValueError(f"DICOMweb HTTP error: {exc.response.status_code} - {exc.response.text}")
+        except httpx.RequestError as exc:
+            logger.error(f"Network error fetching DICOM dataset: {exc}")
+            raise ConnectionError(f"DICOMweb network error: {exc}")
+        except Exception as e:
+            logger.error(f"Error processing DICOM dataset: {e}", exc_info=True)
+            raise
+
+    def _extract_pixel_array_info(ds: pydicom.Dataset) -> Dict[str, Any]:
+        """
+        Extrae el array de píxeles y la información relevante del dataset DICOM.
+        """
+        if not hasattr(ds, 'PixelData') or ds.PixelData is None:
+            raise ValueError("The DICOM instance does not contain pixel data.")
+        
+        pixel_array = ds.pixel_array
+        
+        preview = None
+        if pixel_array.ndim >= 2 and pixel_array.size > 0:
+            if pixel_array.ndim == 2:
+                rows_preview = min(pixel_array.shape[0], 5)
+                cols_preview = min(pixel_array.shape[1], 5)
+                preview = pixel_array[:rows_preview, :cols_preview].tolist()
+            elif pixel_array.ndim == 3:
+                if ds.get("SamplesPerPixel", 1) == 1:
+                     rows_preview = min(pixel_array.shape[1], 5)
+                     cols_preview = min(pixel_array.shape[2], 5)
+                     preview = pixel_array[0, :rows_preview, :cols_preview].tolist()
+                elif ds.get("SamplesPerPixel", 1) > 1 and pixel_array.shape[-1] == ds.SamplesPerPixel:
+                     rows_preview = min(pixel_array.shape[0], 5)
+                     cols_preview = min(pixel_array.shape[1], 5)
+                     preview = pixel_array[:rows_preview, :cols_preview, 0].tolist()
+
+        return {
+            "rows": ds.Rows,
+            "columns": ds.Columns,
+            "pixel_array_shape": list(pixel_array.shape),
+            "pixel_array_dtype": str(pixel_array.dtype),
+            "pixel_array_preview": preview,
+            "message": "Pixel data extracted. Preview shown."
+        }
+
+    return mcp
 
     return mcp
