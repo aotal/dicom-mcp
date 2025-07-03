@@ -17,3 +17,5 @@ calling_aet: "MCPSCU"
 current_node: "orthanc"
 # # Currently selected calling AE title
 # calling_aet: "default"
+
+dicomweb_url: "http://localhost:8042"

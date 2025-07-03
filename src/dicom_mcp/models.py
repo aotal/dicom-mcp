@@ -40,6 +40,9 @@ class StudyResponse(DicomResponseBase):
     ModalitiesInStudy: Optional[str] = None
     AccessionNumber: Optional[str] = None
 
+class StudyQueryResultsWrapper(BaseModel):
+    result: List[StudyResponse]
+
 class SeriesResponse(DicomResponseBase):
     StudyInstanceUID: str
     SeriesInstanceUID: str
@@ -47,6 +50,9 @@ class SeriesResponse(DicomResponseBase):
     SeriesNumber: Optional[str] = None
     SeriesDescription: Optional[str] = None
     PatientName: Optional[str] = None
+
+class SeriesQueryResultsWrapper(BaseModel):
+    result: List[SeriesResponse]
 
 # --- El resto de los modelos no necesitan cambios ---
 class LUTExplanationModel(BaseModel):
@@ -112,6 +118,9 @@ class PatientQueryResult(DicomResponseBase):
     PatientName: Optional[str] = None
     PatientBirthDate: Optional[str] = None
     PatientSex: Optional[str] = None
+
+class PatientQueryResultsWrapper(BaseModel):
+    result: List[PatientQueryResult]
     # Añadir otros campos comunes de paciente que esperes en la respuesta
 
 # Para get_attribute_presets
@@ -129,3 +138,6 @@ class AttributePresetsResponse(BaseModel):
 class QidoResponse(DicomResponseBase):
     class Config:
         extra = 'allow'
+
+class QidoQueryResultsWrapper(BaseModel):
+    result: List[QidoResponse]

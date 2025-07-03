@@ -11,12 +11,12 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Any, AsyncIterator
-from .models import PixelDataResponse, DicomNodeInfo, DicomNodeListResponse, OperationStatusResponse, ConnectionVerificationResponse, PatientQueryResult, StudyResponse, SeriesResponse, AttributePresetDetails, AttributePresetsResponse, QidoResponse
+from .models import PixelDataResponse, DicomNodeInfo, DicomNodeListResponse, OperationStatusResponse, ConnectionVerificationResponse, PatientQueryResult, StudyResponse, SeriesResponse, AttributePresetDetails, AttributePresetsResponse, QidoResponse, PatientQueryResultsWrapper, StudyQueryResultsWrapper, SeriesQueryResultsWrapper, QidoQueryResultsWrapper
 import httpx # Import httpx for DICOMweb operations
 from email.message import Message
 from email.parser import BytesParser
 
-from mcp.server.fastmcp import FastMCP, Context
+from fastmcp import FastMCP, Context
 
 from .attributes import ATTRIBUTE_PRESETS
 from .dicom_client import DicomClient
@@ -80,7 +80,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
     mcp = FastMCP(name, lifespan=lifespan)
     
     # Register tools
-    @mcp.tool()
+    @mcp.tool
     def list_dicom_nodes(ctx: Context = None) -> DicomNodeListResponse:
         """List all configured DICOM nodes and their connection information.
         
@@ -111,7 +111,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         )
     
 
-    @mcp.tool()
+    @mcp.tool
     def switch_dicom_node(node_name: str, ctx: Context = None) -> OperationStatusResponse:
         """Switch the active DICOM node connection to a different configured node.
         
@@ -161,7 +161,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             message=f"Switched to DICOM node: {node_name}"
         )
 
-    @mcp.tool()
+    @mcp.tool
     def verify_connection(ctx: Context = None) -> ConnectionVerificationResponse:
         """Verify connectivity to the current DICOM node using C-ECHO.
         
@@ -181,7 +181,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         success, message = client.verify_connection()
         return ConnectionVerificationResponse(message=message)
 
-    @mcp.tool()
+    @mcp.tool
     def query_patients(
         name_pattern: str = "", 
         patient_id: str = "", 
@@ -191,7 +191,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         exclude_attributes: List[str] = [],
         additional_filters: Dict[str, str] = {},
         ctx: Context = None
-    ) -> List[PatientQueryResult]:
+    ) -> PatientQueryResultsWrapper:
         """Query patients matching the specified criteria from the DICOM node.
         
         This tool performs a DICOM C-FIND operation at the PATIENT level to find patients
@@ -229,11 +229,11 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 exclude_attrs=exclude_attributes,
                 additional_filters=additional_filters
             )
-            return [PatientQueryResult(**r) for r in results]
+            return PatientQueryResultsWrapper(result=[PatientQueryResult(**r) for r in results])
         except Exception as e:
             raise Exception(f"Error querying patients: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool
     def query_studies(
         patient_id: str = "", 
         study_date: str = "", 
@@ -246,7 +246,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         exclude_attributes: List[str] = [],
         additional_filters: Dict[str, str] = {},
         ctx: Context = None
-    ) -> List[StudyResponse]:
+    ) -> StudyQueryResultsWrapper:
         """Query studies matching the specified criteria from the DICOM node.
         
         Args:
@@ -283,11 +283,11 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 exclude_attrs=exclude_attributes,
                 additional_filters=additional_filters
             )
-            return [StudyResponse(**r) for r in results]
+            return StudyQueryResultsWrapper(result=[StudyResponse(**r) for r in results])
         except Exception as e:
             raise Exception(f"Error querying studies: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool
     def query_series(
         study_instance_uid: str, 
         modality: str = "", 
@@ -299,7 +299,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         exclude_attributes: List[str] = [],
         additional_filters: Dict[str, str] = {},
         ctx: Context = None
-    ) -> List[SeriesResponse]:
+    ) -> SeriesQueryResultsWrapper:
         """Query series within a study from the DICOM node.
         
         Args:
@@ -334,13 +334,13 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 exclude_attrs=exclude_attributes,
                 additional_filters=additional_filters
             )
-            return [SeriesResponse(**r) for r in results]
+            return SeriesQueryResultsWrapper(result=[SeriesResponse(**r) for r in results])
         except Exception as e:
             raise Exception(f"Error querying series: {str(e)}")
 
     
 
-    @mcp.tool()
+    @mcp.tool
     async def get_dicomweb_pixel_data(
         study_instance_uid: str,
         series_instance_uid: str,
@@ -418,7 +418,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             logger.error(f"Error processing DICOMweb pixel data: {e}", exc_info=True)
             raise
 
-    @mcp.tool()
+    @mcp.tool
     def get_attribute_presets() -> AttributePresetsResponse:
         """Get all available attribute presets for DICOM queries.
         
@@ -462,12 +462,12 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         ]
     }
 
-    @mcp.tool()
+    @mcp.tool
     async def qido_web_query(
         query_level: str, # e.g., "studies", "series", "instances"
         query_params: Dict[str, Any] = None,
         ctx: Context = None
-    ) -> List[QidoResponse]:
+    ) -> QidoQueryResultsWrapper:
         """Realiza una consulta QIDO-RS al servidor DICOMweb configurado.
 
         Esta herramienta permite consultar estudios, series o instancias en el servidor DICOMweb
@@ -527,7 +527,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                     timeout=30.0
                 )
                 response.raise_for_status()
-                return [QidoResponse(**r) for r in _process_dicom_json_output(response.json())]
+                return QidoQueryResultsWrapper(result=[QidoResponse(**r) for r in _process_dicom_json_output(response.json())])
             except httpx.HTTPStatusError as exc:
                 logger.error(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
                 raise ValueError(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
