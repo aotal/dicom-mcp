@@ -5,6 +5,7 @@ DICOM MCP Server main implementation.
 import logging
 import threading
 import pydicom
+from pydicom.datadict import keyword_for_tag
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -194,9 +195,9 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         patient_id: str = "", 
         birth_date: str = "", 
         attribute_preset: str = "standard", 
-        additional_attributes: List[str] = None,
-        exclude_attributes: List[str] = None,
-        additional_filters: Dict[str, str] = None,
+        additional_attributes: List[str] = [],
+        exclude_attributes: List[str] = [],
+        additional_filters: Dict[str, str] = {},
         ctx: Context = None
     ) -> List[Dict[str, Any]]:
         """Query patients matching the specified criteria from the DICOM node.
@@ -258,9 +259,9 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         accession_number: str = "", 
         study_instance_uid: str = "",
         attribute_preset: str = "standard", 
-        additional_attributes: List[str] = None,
-        exclude_attributes: List[str] = None,
-        additional_filters: Dict[str, str] = None,
+        additional_attributes: List[str] = [],
+        exclude_attributes: List[str] = [],
+        additional_filters: Dict[str, str] = {},
         ctx: Context = None
     ) -> List[Dict[str, Any]]:
         """Query studies matching the specified criteria from the DICOM node.
@@ -310,9 +311,9 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         series_description: str = "", 
         series_instance_uid: str = "",
         attribute_preset: str = "standard", 
-        additional_attributes: List[str] = None,
-        exclude_attributes: List[str] = None,
-        additional_filters: Dict[str, str] = None,
+        additional_attributes: List[str] = [],
+        exclude_attributes: List[str] = [],
+        additional_filters: Dict[str, str] = {},
         ctx: Context = None
     ) -> List[Dict[str, Any]]:
         """Query series within a study from the DICOM node.
@@ -352,49 +353,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         except Exception as e:
             raise Exception(f"Error querying series: {str(e)}")
 
-    @mcp.tool()
-    def query_instances(
-        series_instance_uid: str, 
-        instance_number: str = "", 
-        sop_instance_uid: str = "",
-        attribute_preset: str = "standard", 
-        additional_attributes: List[str] = None,
-        exclude_attributes: List[str] = None,
-        additional_filters: Dict[str, str] = None,
-        ctx: Context = None 
-    ) -> List[Dict[str, Any]]:
-        """Query individual DICOM instances (images) within a series.
-        
-        Args:
-            series_instance_uid: Unique identifier for the series (required)
-            instance_number: Filter by specific instance number within the series
-            sop_instance_uid: Unique identifier for a specific instance
-            attribute_preset: Controls which attributes to include in results
-            additional_attributes: List of specific DICOM attributes to include beyond the preset
-            exclude_attributes: List of DICOM attributes to exclude from the results
-            additional_filters: Dictionary of additional DICOM tags to use for filtering
-        
-        Returns:
-            List of dictionaries, each representing a matched instance with its attributes
-        
-        Raises:
-            Exception: If there is an error communicating with the DICOM node
-        """
-        dicom_ctx = ctx.request_context.lifespan_context
-        client = dicom_ctx.client
-        
-        try:
-            return client.query_instance(
-                series_instance_uid=series_instance_uid,
-                sop_instance_uid=sop_instance_uid,
-                instance_number=instance_number,
-                attribute_preset=attribute_preset,
-                additional_attrs=additional_attributes,
-                exclude_attrs=exclude_attributes,
-                additional_filters=additional_filters
-            )
-        except Exception as e:
-            raise Exception(f"Error querying instances: {str(e)}")
+    
 
     @mcp.tool()
     async def get_dicomweb_pixel_data(
@@ -512,15 +471,141 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             DICOM attributes.
         """
         return ATTRIBUTE_PRESETS
-    
 
 
 
+    FASTAPI_ATTRIBUTE_SETS = {
+        "QC_Convencional": [
+            "00180060",  # KVP
+            "00181151",  # XRayTubeCurrent
+            "00181153",  # ExposureInuAs
+            "00204000"   # ImageComments
+        ],
+        "InfoPacienteEstudio": [
+            "00100010", # PatientName
+            "00081030", # StudyDescription
+            "00080090"  # ReferringPhysicianName
+        ]
+    }
 
+    @mcp.tool()
+    async def qido_web_query(
+        query_level: str, # e.g., "studies", "series", "instances"
+        query_params: Dict[str, Any] = None,
+        ctx: Context = None
+    ) -> List[Dict[str, Any]]:
+        """Realiza una consulta QIDO-RS al servidor DICOMweb configurado.
 
+        Esta herramienta permite consultar estudios, series o instancias en el servidor DICOMweb
+        utilizando QIDO-RS. Soporta la expansión de conjuntos de atributos (includefield)
+        usando conjuntos de atributos predefinidos.
 
+        Args:
+            query_level: El nivel de la consulta (ej. "studies", "series", "instances").
+                         También puede incluir UIDs como "studies/{study_uid}/series".
+            query_params: Un diccionario de parámetros de consulta para la solicitud QIDO-RS.
+                          Soporta la expansión de 'includefield' usando conjuntos de atributos predefinidos.
 
+        Returns:
+            Una lista de diccionarios, cada uno representando un recurso DICOM coincidente.
 
+        Raises:
+            ValueError: Si la URL de DICOMweb no está configurada o query_level es inválido.
+            httpx.HTTPStatusError: Si el servidor DICOMweb devuelve un error HTTP.
+            httpx.RequestError: Si hay un error de red al conectar con el servidor DICOMweb.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        config = dicom_ctx.config
 
+        if not config.dicomweb_url:
+            raise ValueError("DICOMweb URL is not configured. Please set 'dicomweb_url' in configuration.yaml")
+
+        base_url = config.dicomweb_url.rstrip('/') # Ensure no trailing slash
+
+        # Construct the full QIDO-RS URL
+        # Handle cases like "studies" or "studies/{study_uid}/series"
+        if query_level.startswith("studies/") or query_level in ["studies", "series", "instances"]:
+            qido_url = f"{base_url}/{query_level}"
+        else:
+            raise ValueError(f"Invalid query_level: {query_level}. Must be 'studies', 'series', 'instances' or follow 'studies/{{uid}}/series' pattern.")
+
+        # Prepare query parameters, expanding includefield if present
+        processed_params = query_params.copy() if query_params else {}
+        if 'includefield' in processed_params:
+            expanded_fields = []
+            fields_to_check = processed_params['includefield'].split(',')
+            for field in fields_to_check:
+                field = field.strip()
+                if field in FASTAPI_ATTRIBUTE_SETS:
+                    expanded_fields.extend(FASTAPI_ATTRIBUTE_SETS[field])
+                else:
+                    expanded_fields.append(field)
+            processed_params['includefield'] = ",".join(expanded_fields)
+
+        logger.info(f"Proxying QIDO-RS query to: {qido_url} with params: {processed_params}")
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    qido_url,
+                    params=processed_params,
+                    headers={"Accept": "application/dicom+json"},
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                return _process_dicom_json_output(response.json())
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+                raise ValueError(f"DICOMweb QIDO-RS HTTP error: {exc.response.status_code} - {exc.response.text}")
+            except httpx.RequestError as exc:
+                logger.error(f"Network error during DICOMweb QIDO-RS query: {exc}")
+                raise ConnectionError(f"DICOMweb QIDO-RS network error: {exc}")
+
+    def _process_dicom_json_output(dicom_json_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Procesa una lista de objetos JSON DICOM (salida de QIDO-RS) para hacerla más legible.
+
+        Transforma los tags DICOM hexadecimales en nombres de atributos legibles y extrae
+        los valores de la lista 'Value' cuando sea apropiado.
+
+        Args:
+            dicom_json_list: Una lista de diccionarios, donde cada diccionario representa
+                             un objeto DICOM (estudio, serie, instancia) con sus atributos
+                             en formato JSON (ej. {"00100010": {"vr": "PN", "Value": ["DOE^JOHN"]}}).
+
+        Returns:
+            Una lista de diccionarios, donde cada diccionario representa el objeto DICOM
+            con atributos renombrados a sus palabras clave DICOM y valores simplificados.
+        """
+        processed_results = []
+        for dicom_object in dicom_json_list:
+            processed_object = {}
+            for tag_hex, details in dicom_object.items():
+                try:
+                    # Convertir el tag hexadecimal a un objeto Tag de pydicom
+                    tag = pydicom.tag.Tag(tag_hex)
+                    # Obtener la palabra clave (nombre) del atributo
+                    keyword = keyword_for_tag(tag)
+                    
+                    # Si la palabra clave existe, usarla; de lo contrario, usar el tag hexadecimal
+                    display_key = keyword if keyword else tag_hex
+
+                    # Extraer el valor. Si 'Value' es una lista con un solo elemento, tomar ese elemento.
+                    # Si es una lista con múltiples elementos, mantener la lista.
+                    # Si no hay 'Value' o es nulo, usar None.
+                    value = details.get("Value")
+                    if isinstance(value, list):
+                        if len(value) == 1:
+                            processed_object[display_key] = value[0]
+                        else:
+                            processed_object[display_key] = value
+                    else:
+                        processed_object[display_key] = value
+                        
+                except Exception as e:
+                    # En caso de error (ej. tag_hex inválido), mantener el tag original y el valor crudo
+                    processed_object[tag_hex] = details
+                    logger.warning(f"No se pudo procesar el tag DICOM {tag_hex}: {e}")
+            processed_results.append(processed_object)
+        return processed_results
 
     return mcp

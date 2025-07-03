@@ -21,7 +21,7 @@ nodes:
     ae_title: "DCM4CHEE"
     description: "Remote server"
 
-current_node: "jupyter"
+current_node: "dcm4chee"
 calling_aet: "MCPSCU"
 local_storage_dir: "./dicom_received"
 dicomweb_url: "http://localhost:8080/dcm4chee-arc/aets/DCM4CHEE/rs" 

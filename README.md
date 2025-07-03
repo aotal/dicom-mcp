@@ -1,3 +1,9 @@
+# Borrador
+
+studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances
+
+{"includefield": "QC_Convencional"}
+
 # DICOM MCP Server for Medical Imaging Systems 🏥
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
