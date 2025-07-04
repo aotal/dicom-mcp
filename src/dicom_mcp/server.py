@@ -3,10 +3,8 @@ DICOM MCP Server main implementation.
 """
 
 import logging
-import threading
 import pydicom
 from pydicom.datadict import keyword_for_tag
-import numpy as np
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -21,7 +19,6 @@ from fastmcp import FastMCP, Context
 from .attributes import ATTRIBUTE_PRESETS
 from .dicom_client import DicomClient
 from .config import DicomConfiguration, load_config
-from .dicom_scp import start_scp_server
 
 # Configure logging
 logger = logging.getLogger("dicom_mcp")
@@ -33,16 +30,12 @@ class DicomContext:
     config: DicomConfiguration
     client: DicomClient
 
-scp_thread: threading.Thread = None
-scp_server_instance = None
-
 def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMCP:
     """Create and configure a DICOM MCP server."""
     
     # Define a simple lifespan function
     @asynccontextmanager
     async def lifespan(server: FastMCP) -> AsyncIterator[DicomContext]:
-        global scp_thread, scp_server_instance
         # Load config
         config = load_config(config_path)
         
@@ -59,18 +52,6 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         
         logger.info(f"DICOM client initialized: {config.current_node} (calling AE: {config.calling_aet})")
         
-        # Start SCP server in a separate thread
-        # def server_callback(server_instance):
-        #     global scp_server_instance
-        #     scp_server_instance = server_instance
-
-        # scp_thread = threading.Thread(
-        #     target=start_scp_server,
-        #     args=(config, server_callback,),
-        #     daemon=True
-        # )
-        # scp_thread.start()
-        
         try:
             yield DicomContext(config=config, client=client)
         finally:
@@ -80,7 +61,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
     mcp = FastMCP(name, lifespan=lifespan)
     
     # Register tools
-    @mcp.tool
+    @mcp.resource(uri="resource://dicom_nodes")
     def list_dicom_nodes(ctx: Context = None) -> DicomNodeListResponse:
         """List all configured DICOM nodes and their connection information.
         
@@ -340,55 +321,48 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
 
     
 
-    @mcp.tool
+    @mcp.resource("dicomweb://studies/{study_instance_uid}/series/{series_instance_uid}/instances/{sop_instance_uid}/pixeldata")
     async def get_dicomweb_pixel_data(
         study_instance_uid: str,
         series_instance_uid: str,
         sop_instance_uid: str,
-        ctx: Context = None
+        ctx: Context
     ) -> PixelDataResponse:
-        """Retrieves pixel data from a DICOM instance via DICOMweb (WADO-RS).
-        
-        This tool constructs a WADO-RS URL and fetches the pixel data for a specific
-        DICOM instance directly from the configured DICOMweb server.
-        
-        Args:
-            study_instance_uid: The Study Instance UID of the instance.
-            series_instance_uid: The Series Instance UID of the instance.
-            sop_instance_uid: The SOP Instance UID of the instance.
-            
-        Returns:
-            A dictionary containing pixel data metadata and a preview.
         """
-        dicom_ctx = ctx.request_context.lifespan_context
+        Retrieves pixel data for a DICOM instance via DICOMweb (WADO-RS).
+        """
+        dicom_ctx: DicomContext = ctx.request_context.lifespan_context
         config = dicom_ctx.config
 
-        if not config.dicomweb_url:
-            raise ValueError("DICOMweb URL is not configured. Please set 'dicomweb_url' in configuration.yaml")
+        if not config or not config.dicomweb_url:
+            raise ValueError("DICOMweb URL is not configured. Please add it to the server configuration.")
 
-        # Construct WADO-RS URL for pixel data
-        # Example: /studies/{study}/series/{series}/instances/{instance}/frames/{frame}
-        # For single-frame images, frame is usually 1
         dicomweb_url = (
             f"{config.dicomweb_url}/studies/{study_instance_uid}/"
             f"series/{series_instance_uid}/instances/{sop_instance_uid}"
         )
         
-        logger.info(f"Fetching DICOM instance from DICOMweb: {dicomweb_url}")
+        logger.info(f"Retrieving DICOM instance from DICOMweb: {dicomweb_url}")
 
         try:
-            # Use httpx to make the request for the full DICOM instance
             async with httpx.AsyncClient() as client:
-                response = await client.get(dicomweb_url, headers={"Accept": 'multipart/related; type="application/dicom"'}, timeout=30.0)
-                response.raise_for_status() # Raise an exception for HTTP errors
+                response = await client.get(
+                    dicomweb_url, 
+                    headers={"Accept": 'multipart/related; type="application/dicom"'},
+                    timeout=30.0
+                )
+                # This will raise an exception if the status is not 2xx (e.g., 404 Not Found)
+                response.raise_for_status()
 
-                # Parse multipart/related response
-                msg = Message()
-                msg['Content-Type'] = response.headers['Content-Type']
+                # --- COMPLETE PARSING LOGIC ---
                 
-                # Use BytesParser to parse the raw bytes content
+                # Reconstruct headers and body for the parser
+                content_type_header = 'Content-Type: ' + response.headers['Content-Type']
+                full_response_bytes = content_type_header.encode('utf-8') + b'\r\n\r\n' + response.content
+                
+                # Parse the multipart response
                 parser = BytesParser()
-                parsed_msg = parser.parsebytes(b'Content-Type: ' + response.headers['Content-Type'].encode() + b'\r\n\r\n' + response.content)
+                parsed_msg = parser.parsebytes(full_response_bytes)
 
                 dicom_bytes = None
                 for part in parsed_msg.walk():
@@ -397,28 +371,34 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                         break
                 
                 if dicom_bytes is None:
-                    raise ValueError("No application/dicom part found in multipart/related response.")
+                    raise ValueError("No 'application/dicom' part found in the multipart response.")
 
-                # Use pydicom to read the DICOM data from bytes
+                # Use pydicom to read DICOM data from bytes
                 ds = pydicom.dcmread(pydicom.filebase.DicomBytesIO(dicom_bytes), force=True)
 
-            pixel_info = _extract_pixel_array_info(ds)
+                # Extract pixel information
+                pixel_info = _extract_pixel_array_info(ds)
 
-            return PixelDataResponse(
-                sop_instance_uid=sop_instance_uid,
-                **pixel_info
-            )
+                # If all went well, return the response object
+                return PixelDataResponse(
+                    sop_instance_uid=sop_instance_uid,
+                    **pixel_info
+                )
+                # --- END OF PARSING LOGIC ---
+
         except httpx.HTTPStatusError as exc:
-            logger.error(f"HTTP error fetching DICOMweb pixel data: {exc.response.status_code} - {exc.response.text}")
-            raise ValueError(f"DICOMweb HTTP error: {exc.response.status_code} - {exc.response.text}")
+            logger.error(f"HTTP error retrieving DICOMweb data: {exc.response.status_code} - {exc.response.text}")
+            raise ValueError(f"HTTP error in DICOMweb: {exc.response.status_code} - {exc.response.text}")
+        
         except httpx.RequestError as exc:
-            logger.error(f"Network error fetching DICOMweb pixel data: {exc}")
-            raise ConnectionError(f"DICOMweb network error: {exc}")
+            logger.error(f"Network error retrieving DICOMweb data: {exc}")
+            raise ConnectionError(f"Network error in DICOMweb: {exc}")
+        
         except Exception as e:
-            logger.error(f"Error processing DICOMweb pixel data: {e}", exc_info=True)
+            logger.error(f"Error processing DICOMweb data: {e}", exc_info=True)
             raise
 
-    @mcp.tool
+    @mcp.resource(uri="resource://attribute_presets")
     def get_attribute_presets() -> AttributePresetsResponse:
         """Get all available attribute presets for DICOM queries.
         
@@ -468,25 +448,25 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         query_params: Dict[str, Any] = None,
         ctx: Context = None
     ) -> QidoQueryResultsWrapper:
-        """Realiza una consulta QIDO-RS al servidor DICOMweb configurado.
+        """Performs a QIDO-RS query to the configured DICOMweb server.
 
-        Esta herramienta permite consultar estudios, series o instancias en el servidor DICOMweb
-        utilizando QIDO-RS. Soporta la expansión de conjuntos de atributos (includefield)
-        usando conjuntos de atributos predefinidos.
+        This tool allows querying studies, series, or instances on the DICOMweb server
+        using QIDO-RS. It supports expanding attribute sets (includefield)
+        using predefined attribute sets.
 
         Args:
-            query_level: El nivel de la consulta (ej. "studies", "series", "instances").
-                         También puede incluir UIDs como "studies/{study_uid}/series".
-            query_params: Un diccionario de parámetros de consulta para la solicitud QIDO-RS.
-                          Soporta la expansión de 'includefield' usando conjuntos de atributos predefinidos.
+            query_level: The query level (e.g., "studies", "series", "instances").
+                         Can also include UIDs like "studies/{study_uid}/series".
+            query_params: A dictionary of query parameters for the QIDO-RS request.
+                          Supports expanding 'includefield' using predefined attribute sets.
 
         Returns:
-            Una lista de diccionarios, cada uno representando un recurso DICOM coincidente.
+            A list of dictionaries, each representing a matching DICOM resource.
 
         Raises:
-            ValueError: Si la URL de DICOMweb no está configurada o query_level es inválido.
-            httpx.HTTPStatusError: Si el servidor DICOMweb devuelve un error HTTP.
-            httpx.RequestError: Si hay un error de red al conectar con el servidor DICOMweb.
+            ValueError: If the DICOMweb URL is not configured or query_level is invalid.
+            httpx.HTTPStatusError: If the DICOMweb server returns an HTTP error.
+            httpx.RequestError: If there is a network error connecting to the DICOMweb server.
         """
         dicom_ctx = ctx.request_context.lifespan_context
         config = dicom_ctx.config
@@ -536,45 +516,45 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 raise ConnectionError(f"DICOMweb QIDO-RS network error: {exc}")
 
     def _process_dicom_json_output(dicom_json_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Procesa una lista de objetos JSON DICOM (salida de QIDO-RS) para hacerla más legible.
+        """Processes a list of DICOM JSON objects (QIDO-RS output) to make it more readable.
 
-        Transforma los tags DICOM hexadecimales en nombres de atributos legibles y extrae
-        los valores de la lista 'Value' cuando sea apropiado.
+        Transforms hexadecimal DICOM tags into readable attribute names and extracts
+        'Value' list elements when appropriate.
 
         Args:
-            dicom_json_list: Una lista de diccionarios, donde cada diccionario representa
-                             un objeto DICOM (estudio, serie, instancia) con sus atributos
-                             en formato JSON (ej. {"00100010": {"vr": "PN", "Value": ["DOE^JOHN"]}}).
+            dicom_json_list: A list of dictionaries, where each dictionary represents
+                             a DICOM object (study, series, instance) with its attributes
+                             in JSON format (e.g., {"00100010": {"vr": "PN", "Value": ["DOE^JOHN"]}}).
 
         Returns:
-            Una lista de diccionarios, donde cada diccionario representa el objeto DICOM
-            con atributos renombrados a sus palabras clave DICOM y valores simplificados.
+            A list of dictionaries, where each dictionary represents the DICOM object
+            with attributes renamed to their DICOM keywords and simplified values.
         """
         processed_results = []
         for dicom_object in dicom_json_list:
             processed_object = {}
             for tag_hex, details in dicom_object.items():
                 try:
-                    # Convertir el tag hexadecimal a un objeto Tag de pydicom
+                    # Convert the hexadecimal tag to a pydicom Tag object
                     tag = pydicom.tag.Tag(tag_hex)
-                    # Obtener la palabra clave (nombre) del atributo
+                    # Get the keyword (name) of the attribute
                     keyword = keyword_for_tag(tag)
                     
-                    # Si la palabra clave existe, usarla; de lo contrario, usar el tag hexadecimal
+                    # If the keyword exists, use it; otherwise, use the hexadecimal tag
                     display_key = keyword if keyword else tag_hex
 
-                    # Manejar secuencias (VR = SQ)
+                    # Handle sequences (VR = SQ)
                     if details.get("vr") == "SQ":
                         sequence_items = []
                         if "Value" in details and isinstance(details["Value"], list):
                             for item_dict in details["Value"]:
-                                # Llamada recursiva para procesar cada ítem de la secuencia
+                                # Recursive call to process each item in the sequence
                                 sequence_items.append(_process_dicom_json_output([item_dict])[0])
                         processed_object[display_key] = sequence_items
                     else:
-                        # Extraer el valor. Si 'Value' es una lista con un solo elemento, tomar ese elemento.
-                        # Si es una lista con múltiples elementos, mantener la lista.
-                        # Si no hay 'Value' o es nulo, usar None.
+                        # Extract the value. If 'Value' is a list with a single element, take that element.
+                        # If it's a list with multiple elements, keep the list.
+                        # If there is no 'Value' or it is null, use None.
                         value = details.get("Value")
                         if isinstance(value, list):
                             if len(value) == 1:
@@ -585,62 +565,17 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                             processed_object[display_key] = value
                         
                 except Exception as e:
-                    # En caso de error (ej. tag_hex inválido), mantener el tag original y el valor crudo
+                    # In case of error (e.g., invalid tag_hex), keep the original tag and raw value
                     processed_object[tag_hex] = details
-                    logger.warning(f"No se pudo procesar el tag DICOM {tag_hex}: {e}")
+                    logger.warning(f"Could not process DICOM tag {tag_hex}: {e}")
             if "NumberOfFrames" in processed_object:
                 del processed_object["NumberOfFrames"]
             processed_results.append(processed_object)
         return processed_results
 
-    def _fetch_dicom_dataset(
-        dicomweb_url: str,
-        study_instance_uid: str,
-        series_instance_uid: str,
-        sop_instance_uid: str
-    ) -> pydicom.Dataset:
-        """
-        Obtiene el dataset DICOM completo de una instancia a través de DICOMweb (WADO-RS).
-        """
-        full_dicomweb_url = (
-            f"{dicomweb_url}/studies/{study_instance_uid}/"
-            f"series/{series_instance_uid}/instances/{sop_instance_uid}"
-        )
-        logger.info(f"Fetching DICOM dataset from DICOMweb: {full_dicomweb_url}")
-
-        try:
-            with httpx.Client() as client: # Usar httpx.Client para llamadas síncronas si la herramienta es síncrona
-                response = client.get(full_dicomweb_url, headers={"Accept": 'multipart/related; type="application/dicom"'}, timeout=30.0)
-                response.raise_for_status()
-
-                msg = Message()
-                msg['Content-Type'] = response.headers['Content-Type']
-                parser = BytesParser()
-                parsed_msg = parser.parsebytes(b'Content-Type: ' + response.headers['Content-Type'].encode() + b'\n\n' + response.content)
-
-                dicom_bytes = None
-                for part in parsed_msg.walk():
-                    if part.get_content_type() == 'application/dicom':
-                        dicom_bytes = part.get_payload(decode=True)
-                        break
-                
-                if dicom_bytes is None:
-                    raise ValueError("No application/dicom part found in multipart/related response.")
-
-                return pydicom.dcmread(pydicom.filebase.DicomBytesIO(dicom_bytes), force=True)
-        except httpx.HTTPStatusError as exc:
-            logger.error(f"HTTP error fetching DICOM dataset: {exc.response.status_code} - {exc.response.text}")
-            raise ValueError(f"DICOMweb HTTP error: {exc.response.status_code} - {exc.response.text}")
-        except httpx.RequestError as exc:
-            logger.error(f"Network error fetching DICOM dataset: {exc}")
-            raise ConnectionError(f"DICOMweb network error: {exc}")
-        except Exception as e:
-            logger.error(f"Error processing DICOM dataset: {e}", exc_info=True)
-            raise
-
     def _extract_pixel_array_info(ds: pydicom.Dataset) -> Dict[str, Any]:
         """
-        Extrae el array de píxeles y la información relevante del dataset DICOM.
+        Extracts the pixel array and relevant information from the DICOM dataset.
         """
         if not hasattr(ds, 'PixelData') or ds.PixelData is None:
             raise ValueError("The DICOM instance does not contain pixel data.")
@@ -672,6 +607,32 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             "message": "Pixel data extracted. Preview shown."
         }
 
-    return mcp
+    @mcp.prompt
+    def simple_test_prompt(message: str) -> str:
+        """A simple test prompt that echoes the input message."""
+        return f"Prompt received: {message}"
+
+    @mcp.prompt
+    def explain_dicom_attribute(attribute_name: str, attribute_value: Any) -> str:
+        """
+        Generates a prompt for an LLM to explain a specific DICOM attribute and its value.
+
+        Args:
+            attribute_name: The name of the DICOM attribute (e.g., "PatientName", "StudyDate").
+            attribute_value: The value of the DICOM attribute.
+
+        Returns:
+            A formatted string ready to be sent to a language model.
+        """
+        prompt = f"""
+You are a DICOM expert. Explain the following DICOM attribute and its value in simple terms.
+Describe what this attribute means in the context of a medical image or study.
+
+DICOM Attribute Name: {attribute_name}
+Attribute Value: {attribute_value}
+
+Please provide a clear and easy-to-understand explanation.
+"""
+        return prompt
 
     return mcp

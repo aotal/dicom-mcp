@@ -1,213 +1,204 @@
-# Borrador
+# DICOM Model Context Protocol (MCP) Server
 
-studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances
+[![PyPI - Version](https://img.shields.io/pypi/v/dicom-mcp)](https://pypi.org/project/dicom-mcp/)
+[![Python Version](https://img.shields.io/pypi/pyversions/dicom-mcp)](https://pypi.org/project/dicom-mcp/)
+[![License](https://img.shields.io/github/license/your-repo/dicom-mcp)](LICENSE)
 
-{"includefield": "QC_Convencional"}
+## Overview
 
-# DICOM MCP Server for Medical Imaging Systems 🏥
+This project implements a DICOM Model Context Protocol (MCP) server, providing a robust and flexible interface for interacting with DICOM (Digital Imaging and Communications in Medicine) servers. It abstracts the complexities of DICOM networking, allowing for seamless integration with various medical imaging systems (PACS, workstations, etc.).
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python Version](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
- [![PyPI Version](https://img.shields.io/pypi/v/dicom-mcp.svg)](https://pypi.org/project/dicom-mcp/) [![PyPI Downloads](https://img.shields.io/pypi/dm/dicom-mcp.svg)](https://pypi.org/project/dicom-mcp/)  
+The server is built using Python and leverages `pynetdicom` for DICOM communication and `FastMCP` for its core server framework.
 
-The `dicom-mcp` server enables AI assistants to query, read, and move data on DICOM servers (PACS, VNA, etc.). 
+## Key Features
 
-<div align="center">
+The DICOM MCP Server offers a comprehensive set of functionalities for managing and querying DICOM data:
 
-🤝 **[Contribute](#contributing)** •
-📝 **[Report Bug](https://github.com/ChristianHinge/dicom-mcp/issues)**  •
-📝 **[Blog Post 1](https://www.christianhinge.com/projects/dicom-mcp/)** 
+*   **DICOM Node Management**:
+    *   List all configured DICOM nodes.
+    *   Switch between different DICOM nodes for operations.
+    *   Verify connectivity to DICOM nodes using C-ECHO.
 
-</div>
+*   **Query & Retrieve (C-FIND)**:
+    *   **Patient Queries**: Search for patient records based on various criteria (ID, name, birth date).
+    *   **Study Queries**: Find studies by patient ID, date, modality, description, accession number, or Study Instance UID.
+    *   **Series Queries**: Query series within a specific study by modality, series number, description, or Series Instance UID.
+    *   **Instance Queries**: Retrieve specific instances within a series.
+    *   **Attribute Presets**: Utilize predefined attribute sets (minimal, standard, extended) for query results, with options to include/exclude additional attributes.
 
-```text
----------------------------------------------------------------------
-🧑‍⚕️ User: "Any significant findings in John Doe's previous CT report?"
+*   **DICOMweb Integration (QIDO-RS, WADO-RS)**:
+    *   **QIDO-RS Queries**: Perform QIDO-RS queries to retrieve studies, series, or instances directly from a configured DICOMweb server. Supports expansion of predefined attribute sets.
+    *   **WADO-RS Pixel Data Retrieval**: Fetch pixel data for DICOM instances via WADO-RS, providing image dimensions, data type, and a preview of the pixel array.
 
-🧠 LLM → ⚙️ Tools:
-   query_patients → query_studies → query_series → extract_pdf_text_from_dicom
+*   **DICOM C-MOVE Operations**:
+    *   Move entire studies or specific series to another DICOM node.
 
-💬 LLM Response: "The report from 2025-03-26 mentions a history of splenomegaly (enlarged spleen)"
+*   **Encapsulated PDF Handling**:
+    *   Retrieve DICOM instances containing encapsulated PDF documents and extract their text content.
 
-🧑‍⚕️ User: "What's the volume of his spleen at the last scan and the scan today?"
+*   **LLM Integration Prompts**:
+    *   Generate structured prompts for Large Language Models (LLMs) to explain DICOM query results or specific DICOM attributes in a user-friendly manner.
 
-🧠 LLM → ⚙️ Tools:
-   (query_studies → query_series → move_series → query_series → extract_pdf_text_from_dicom) x2
-   (The move_series tool sends the latest CT to a DICOM segmentation node, which returns volume PDF report)
+## Configuration
 
-💬 LLM Response: "last year 2024-03-26: 412cm³, today 2025-04-10: 350cm³"
----------------------------------------------------------------------
+The server's behavior and DICOM node connections are managed through a `configuration.yaml` file. This file defines:
+
+*   **`nodes`**: A dictionary of DICOM nodes, each with a `host`, `port`, `ae_title` (Application Entity Title), and an optional `description`.
+*   **`current_node`**: The name of the currently active DICOM node for operations.
+*   **`calling_aet`**: The AE title that this MCP server will use when initiating DICOM connections.
+*   **`local_storage_dir`**: The directory where received DICOM files will be stored by the SCP (if enabled).
+*   **`dicomweb_url`**: The base URL for the DICOMweb server to be used for QIDO-RS and WADO-RS operations.
+
+An example `configuration.yaml` is provided in `src/dicom_mcp/configuration.yaml`.
+
+## Data Models
+
+The project uses `Pydantic` for data validation and serialization, defining clear and robust models for DICOM responses and requests. The `DicomResponseBase` model includes a universal validator to convert non-primitive Python data types (especially `pydicom` specific types) to strings for consistent output.
+
+## Getting Started
+
+To run the DICOM MCP server:
+
+1.  **Install Dependencies**: Ensure you have all required Python packages installed. It's recommended to use a virtual environment.
+
+    ```bash
+    pip install -r requirements.txt
+    ```
+    (Note: A `requirements.txt` can be generated from `pyproject.toml` using `pip freeze > requirements.txt` or `uv pip freeze > requirements.txt` if using `uv`).
+
+    The core dependencies are:
+    *   `httpx`
+    *   `fastmcp`
+    *   `numpy`
+    *   `pynetdicom`
+    *   `pypdf2`
+    *   `pyyaml`
+    *   `pydicom`
+
+2.  **Configure**: Edit the `src/dicom_mcp/configuration.yaml` file to define your DICOM nodes and DICOMweb URL.
+
+3.  **Run the Server**: Execute the main script:
+    ```bash
+    python -m src.dicom_mcp
+    ```
+    You can specify a custom configuration path and transport protocol:
+    ```bash
+    python -m src.dicom_mcp /path/to/your/config.yaml --transport sse
+    ```
+
+## Usage Examples
+
+Here are some examples of how to interact with the DICOM MCP server's functionalities (assuming you are interacting with the MCP server via its defined tools and resources):
+
+### DICOM Node Management
+
+*   **List DICOM Nodes**:
+    ```python
+    # Example interaction with the MCP server to list nodes
+    # (This would typically be called by an LLM or client application)
+    # mcp_server.resource("resource://dicom_nodes").get()
+    ```
+
+*   **Switch DICOM Node**:
+    ```python
+    # Example interaction with the MCP server to switch nodes
+    # mcp_server.tool("switch_dicom_node").call(node_name="orthanc")
+    ```
+
+*   **Verify Connection**:
+    ```python
+    # Example interaction with the MCP server to verify connection
+    # mcp_server.tool("verify_connection").call()
+    ```
+
+### Query & Retrieve
+
+*   **Query Patients**:
+    ```python
+    # Example interaction with the MCP server to query patients
+    # mcp_server.tool("query_patients").call(name_pattern="DOE*", patient_id="12345")
+    ```
+
+*   **Query Studies**:
+    ```python
+    # Example interaction with the MCP server to query studies
+    # mcp_server.tool("query_studies").call(patient_id="12345", study_date="20230101-20230131")
+    ```
+
+*   **Query Series**:
+    ```python
+    # Example interaction with the MCP server to query series
+    # mcp_server.tool("query_series").call(study_instance_uid="1.2.3.4.5.6", modality="CT")
+    ```
+
+*   **Get DICOMweb Pixel Data**:
+    ```python
+    # Example interaction with the MCP server to get pixel data
+    # mcp_server.resource("dicomweb://studies/{study_uid}/series/{series_uid}/instances/{sop_uid}/pixeldata").get(
+    #     study_instance_uid="1.2.3.4", series_instance_uid="1.2.3.4.5", sop_instance_uid="1.2.3.4.5.6"
+    # )
+    ```
+
+### DICOM C-MOVE Operations
+
+*   **Move Series**:
+    ```python
+    # Example interaction with the MCP server to move a series
+    # mcp_server.tool("move_series").call(destination_ae="DEST_AE", series_instance_uid="1.2.3.4.5")
+    ```
+
+*   **Move Study**:
+    ```python
+    # Example interaction with the MCP server to move a study
+    # mcp_server.tool("move_study").call(destination_ae="DEST_AE", study_instance_uid="1.2.3.4")
+    ```
+
+### Encapsulated PDF Handling
+
+*   **Extract PDF Text from DICOM**:
+    ```python
+    # Example interaction with the MCP server to extract PDF text
+    # mcp_server.tool("extract_pdf_text_from_dicom").call(
+    #     study_instance_uid="1.2.3.4", series_instance_uid="1.2.3.4.5", sop_instance_uid="1.2.3.4.5.6"
+    # )
+    ```
+
+### LLM Integration Prompts
+
+*   **Explain DICOM Attribute**:
+    ```python
+    # Example interaction with the MCP server to generate an LLM prompt
+    # mcp_server.prompt("explain_dicom_attribute").call(attribute_name="PatientName", attribute_value="DOE^JOHN")
+    ```
+
+## Project Structure
+
+```
+dicom-mcp/
+├── .github/                 # GitHub Actions workflows
+├── doc/                     # Additional documentation and notes
+├── src/
+│   └── dicom_mcp/           # Main application source code
+│       ├── __init__.py      # Package initialization
+│       ├── __main__.py      # Main entry point for the server
+│       ├── attributes.py    # DICOM attribute presets
+│       ├── config.py        # Configuration loading and models
+│       ├── dicom_client.py  # DICOM client functionalities (C-FIND, C-MOVE, C-GET)
+│       ├── dicom_scp.py     # DICOM Storage SCP implementation
+│       ├── models.py        # Pydantic data models for requests/responses
+│       └── server.py        # FastMCP server definition and tool/resource registration
+├── tests/                   # Unit and integration tests
+├── .gitignore
+├── pyproject.toml           # Project metadata and dependencies
+├── README.md                # This file
+├── LICENSE                  # Project license
+└── ...
 ```
 
+## Contribution
 
-## ✨ Core Capabilities
+Contributions are welcome! Please refer to the project's `.github/workflows/release.yml` for CI/CD setup and `pyproject.toml` for project dependencies. Follow standard Python development practices and ensure tests pass before submitting pull requests.
 
-`dicom-mcp` provides tools to:
+## License
 
-* **🔍 Query Metadata**: Search for patients, studies, series, and instances using various criteria.
-* **📄 Read DICOM Reports (PDF)**: Retrieve DICOM instances containing encapsulated PDFs (e.g., clinical reports) and extract the text content.
-* **➡️ Send DICOM Images**: Send series or studies to other DICOM destinations, e.g. AI endpoints for image segmentation, classification, etc.
-* **⚙️ Utilities**: Manage connections and understand query options.
-
-## 🚀 Quick Start
-### 📥 Installation
-Install using uv or pip:
-
-```bash
-uv tool install dicom-mcp
-```
-Or by cloning the repository:
-
-```bash
-# Clone and set up development environment
-git clone https://github.com/ChristianHinge/dicom-mcp
-cd dicom mcp
-
-# Create and activate virtual environment
-uv venv
-source .venv/bin/activate
-
-# Install with test dependencies
-uv pip install -e ".[dev]"
-```
-
-
-### ⚙️ Configuration
-
-`dicom-mcp` requires a YAML configuration file (`config.yaml` or similar) defining DICOM nodes and calling AE titles. Adapt the configuration or keep as is for compatibility with the sample ORTHANC  Server.
-
-```yaml
-nodes:
-  main:
-    host: "localhost"
-    port: 4242 
-    ae_title: "ORTHANC"
-    description: "Local Orthanc DICOM server"
-
-current_node: "main"
-calling_aet: "MCPSCU" 
-```
-> [!WARNING]
-DICOM-MCP is not meant for clinical use, and should not be connected with live hospital databases or databases with patient-sensitive data. Doing so could lead to both loss of patient data, and leakage of patient data onto the internet. DICOM-MCP can be used with locally hosted open-weight LLMs for complete data privacy. 
-
-### (Optional) Sample ORTHANC server
-If you don't have a DICOM server available, you can run a local ORTHANC server using Docker:
-
-Clone the repository and install test dependencies `pip install -e ".[dev]`
-
-```bash
-cd tests
-docker ocmpose up -d
-cd ..
-pytest # uploads dummy pdf data to ORTHANC server
-```
-UI at [http://localhost:8042](http://localhost:8042)
-
-### 🔌 MCP Integration
-
-Add to your client configuration (e.g. `claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "dicom": {
-      "command": "uv",
-      "args": ["tool","dicom-mcp", "/path/to/your_config.yaml"]
-    }
-  }
-}
-```
-
-For development:
-
-```json
-{
-    "mcpServers": {
-        "arxiv-mcp-server": {
-            "command": "uv",
-            "args": [
-                "--directory",
-                "path/to/cloned/dicom-mcp",
-                "run",
-                "dicom-mcp",
-                "/path/to/your_config.yaml"
-            ]
-        }
-    }
-}
-```
-
-
-## 🛠️ Tools Overview
-
-`dicom-mcp` provides four categories of tools for interaction with DICOM servers and DICOM data. 
-
-### 🔍 Query Metadata
-
-* **`query_patients`**: Search for patients based on criteria like name, ID, or birth date.
-* **`query_studies`**: Find studies using patient ID, date, modality, description, accession number, or Study UID.
-* **`query_series`**: Locate series within a specific study using modality, series number/description, or Series UID.
-* **`query_instances`**: Find individual instances (images/objects) within a series using instance number or SOP Instance UID
-### 📄 Read DICOM Reports (PDF)
-
-* **`extract_pdf_text_from_dicom`**: Retrieve a specific DICOM instance containing an encapsulated PDF and extract its text content.
-
-### ➡️ Send DICOM Images
-
-* **`move_series`**: Send a specific DICOM series to another configured DICOM node using C-MOVE.
-* **`move_study`**: Send an entire DICOM study to another configured DICOM node using C-MOVE.
-
-### ⚙️ Utilities
-
-* **`list_dicom_nodes`**: Show the currently active DICOM node and list all configured nodes.
-* **`switch_dicom_node`**: Change the active DICOM node for subsequent operations.
-* **`verify_connection`**: Test the DICOM network connection to the currently active node using C-ECHO.
-* **`get_attribute_presets`**: List the available levels of detail (minimal, standard, extended) for metadata query results.<p>
-
-
-### Example interaction
-The tools can be chained together to answer complex questions:
-
-
-<div align="center">
-<img src="images/example.png" alt="My Awesome Diagram" width="700">
-</div>
-
-
-## 📈 Contributing
-### Running Tests
-
-Tests require a running Orthanc DICOM server. You can use Docker:
-
-```bash
-# Navigate to the directory containing docker-compose.yml (e.g., tests/)
-cd tests
-docker-compose up -d
-```
-
-Run tests using pytest:
-
-```bash
-# From the project root directory
-pytest
-```
-
-Stop the Orthanc container:
-
-```bash
-cd tests
-docker-compose down
-```
-
-### Debugging
-
-Use the MCP Inspector for debugging the server communication:
-
-```bash
-npx @modelcontextprotocol/inspector uv run dicom-mcp /path/to/your_config.yaml --transport stdio
-```
-
-## 🙏 Acknowledgments
-
-* Built using [pynetdicom](https://github.com/pydicom/pynetdicom)
-* Uses [PyPDF2](https://pypi.org/project/PyPDF2/) for PDF text extraction
+This project is licensed under the terms specified in the [LICENSE](LICENSE) file.

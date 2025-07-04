@@ -12,12 +12,12 @@ from .config import DicomConfiguration, DicomNodeConfig
 logger = logging.getLogger(__name__)
 
 def handle_store(event, storage_dir: Path):
-    """Manejador para el evento evt.EVT_C_STORE en el SCP receptor."""
+    """Handler for the evt.EVT_C_STORE event in the receiving SCP."""
     try:
         ds = event.dataset
         
         if not hasattr(ds, 'SOPInstanceUID'):
-            logger.error("Dataset C-STORE recibido no tiene SOPInstanceUID.")
+            logger.error("Received C-STORE dataset has no SOPInstanceUID.")
             return 0xA801 # Processing failure
 
         meta = FileMetaDataset()
@@ -36,38 +36,38 @@ def handle_store(event, storage_dir: Path):
         
         ds.save_as(filepath, enforce_file_format=True)
         
-        logger.info(f"Archivo DICOM recibido y guardado: {filepath}")
-        return 0x0000 # Éxito
+        logger.info(f"DICOM file received and saved: {filepath}")
+        return 0x0000 # Success
     except Exception as e:
-        sop_uid_for_log = getattr(event.dataset, 'SOPInstanceUID', 'UID_DESCONOCIDO')
-        logger.error(f"Error al manejar C-STORE para SOPInstanceUID '{sop_uid_for_log}': {e}", exc_info=True)
-        return 0xC001 # Error: No se puede procesar
+        sop_uid_for_log = getattr(event.dataset, 'SOPInstanceUID', 'UNKNOWN_UID')
+        logger.error(f"Error handling C-STORE for SOPInstanceUID '{sop_uid_for_log}': {e}", exc_info=True)
+        return 0xC001 # Error: Cannot process
 
 def handle_echo(event):
-    """Manejador para el evento evt.EVT_C_ECHO."""
-    calling_ae = getattr(event.assoc.ae, 'calling_ae_title', 'Desconocido')
-    logger.info(f"Recibido C-ECHO de {calling_ae}")
+    """Handler for the evt.EVT_C_ECHO event."""
+    calling_ae = getattr(event.assoc.ae, 'calling_ae_title', 'Unknown')
+    logger.info(f"Received C-ECHO from {calling_ae}")
     return 0x0000 
 
 def start_scp_server(config: DicomConfiguration, callback=None):
     """
-    Inicia el servidor C-STORE SCP. Esta función es bloqueante.
-    Si se proporciona un callback, se llama con la instancia del servidor AE.
+    Starts the C-STORE SCP server. This function is blocking.
+    If a callback is provided, it is called with the AE server instance.
     """
     
     scp_node_config = config.nodes.get('local_scp')
     if not scp_node_config:
-        logger.error("No se encontró la configuración para 'local_scp' en el fichero de configuración.")
+        logger.error("No 'local_scp' configuration found in the configuration file.")
         return
 
     storage_dir = Path(config.local_storage_dir)
     try:
         storage_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        logger.error(f"No se pudo crear el directorio de recepción DICOM en '{storage_dir}': {e}")
+        logger.error(f"Could not create DICOM reception directory at '{storage_dir}': {e}")
         return
 
-    # Crear una función parcial para el manejador de C-STORE que incluya el directorio de almacenamiento
+    # Create a partial function for the C-STORE handler that includes the storage directory
     from functools import partial
     bound_handle_store = partial(handle_store, storage_dir=storage_dir)
 
@@ -85,7 +85,7 @@ def start_scp_server(config: DicomConfiguration, callback=None):
     host = scp_node_config.host
     port = scp_node_config.port
     
-    logger.info(f"Iniciando servidor C-STORE SCP en {host}:{port} con AET: {ae_scp.ae_title}")
+    logger.info(f"Starting C-STORE SCP server on {host}:{port} with AET: {ae_scp.ae_title}")
     
     if callback:
         callback(ae_scp)
@@ -93,6 +93,6 @@ def start_scp_server(config: DicomConfiguration, callback=None):
     try:
         ae_scp.start_server((host, port), block=True, evt_handlers=handlers)
     except Exception as e:
-        logger.error(f"Error fatal al iniciar o durante la ejecución del servidor SCP: {e}", exc_info=True)
+        logger.error(f"Fatal error starting or during SCP server execution: {e}", exc_info=True)
     finally:
-        logger.info("Servidor SCP detenido.")
+        logger.info("SCP server stopped.")
