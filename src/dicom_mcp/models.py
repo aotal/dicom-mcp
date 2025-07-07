@@ -1,5 +1,6 @@
 # models.py
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, FieldValidationInfo
+import re
 from typing import Optional, List, Dict, Any, Tuple
 
 # --- BASE MODEL WITH UNIVERSAL AND ROBUST VALIDATOR ---
@@ -137,6 +138,43 @@ class AttributePresetsResponse(BaseModel):
 class QidoResponse(DicomResponseBase):
     class Config:
         extra = 'allow'
+
+class ModalityLUTSequenceItem(DicomResponseBase):
+    LUTDescriptor: Optional[List[int]] = None
+    ModalityLUTType: Optional[str] = None
+    LUTExplanation: Optional[Dict[str, Any]] = None
+
+    @field_validator('LUTExplanation', mode='before')
+    @classmethod
+    def parse_lut_explanation(cls, v: Any, info: FieldValidationInfo) -> Optional[Dict[str, Any]]:
+        if isinstance(v, str):
+            explanation_str = v
+            
+            kerma_match = re.search(r"Kerma\s*(?P<unit>[a-zA-Z]+)\s*\(SF=(?P<dfd>\d+)\)", explanation_str)
+            in_calib_range_match = re.search(r"InCalibRange:(?P<min>\d+\.\d+)-(?P<max>\d+\.\d+)", explanation_str)
+            out_lut_range_match = re.search(r"OutLUTRange:(?P<min>\d+)-(?P<max>\d+)", explanation_str)
+
+            parsed_data = {}
+            if kerma_match:
+                parsed_data["Kerma"] = {
+                    "Unidad": kerma_match.group("unit"),
+                    "SF": int(kerma_match.group("dfd"))
+                }
+            if in_calib_range_match:
+                parsed_data["InCalibRange"] = {
+                    "min": float(in_calib_range_match.group("min")),
+                    "max": float(in_calib_range_match.group("max"))
+                }
+            if out_lut_range_match:
+                parsed_data["OutLUTRange"] = {
+                    "min": int(out_lut_range_match.group("min")),
+                    "max": int(out_lut_range_match.group("max"))
+                }
+            return parsed_data
+        return v
+
+class ModalityLUTSequenceModel(DicomResponseBase):
+    ModalityLUTSequence: Optional[List[ModalityLUTSequenceItem]] = None
 
 class QidoQueryResultsWrapper(BaseModel):
     result: List[QidoResponse]

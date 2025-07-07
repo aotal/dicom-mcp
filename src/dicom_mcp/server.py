@@ -9,7 +9,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Any, AsyncIterator
-from .models import PixelDataResponse, DicomNodeInfo, DicomNodeListResponse, OperationStatusResponse, ConnectionVerificationResponse, PatientQueryResult, StudyResponse, SeriesResponse, AttributePresetDetails, AttributePresetsResponse, QidoResponse, PatientQueryResultsWrapper, StudyQueryResultsWrapper, SeriesQueryResultsWrapper, QidoQueryResultsWrapper
+from .models import PixelDataResponse, DicomNodeInfo, DicomNodeListResponse, OperationStatusResponse, ConnectionVerificationResponse, PatientQueryResult, StudyResponse, SeriesResponse, AttributePresetDetails, AttributePresetsResponse, QidoResponse, PatientQueryResultsWrapper, StudyQueryResultsWrapper, SeriesQueryResultsWrapper, QidoQueryResultsWrapper, ModalityLUTSequenceModel, ModalityLUTSequenceItem
 import httpx # Import httpx for DICOMweb operations
 from email.message import Message
 from email.parser import BytesParser
@@ -433,7 +433,8 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             "00180060",  # KVP
             "00181151",  # XRayTubeCurrent
             "00181153",  # ExposureInuAs
-            "00204000"   # ImageComments
+            "00204000",  # ImageComments
+            "00283000"   # ModalityLUTSequence
         ],
         "InfoPacienteEstudio": [
             "00100010", # PatientName
@@ -548,8 +549,23 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                         sequence_items = []
                         if "Value" in details and isinstance(details["Value"], list):
                             for item_dict in details["Value"]:
-                                # Recursive call to process each item in the sequence
-                                sequence_items.append(_process_dicom_json_output([item_dict])[0])
+                                # Special handling for ModalityLUTSequence (0028,3000)
+                                if tag_hex == "00283000":
+                                    # Process each item in the sequence as ModalityLUTSequenceItem
+                                    processed_item = {}
+                                    for sub_tag_hex, sub_details in item_dict.items():
+                                        sub_tag = pydicom.tag.Tag(sub_tag_hex)
+                                        sub_keyword = keyword_for_tag(sub_tag)
+                                        sub_display_key = sub_keyword if sub_keyword else sub_tag_hex
+                                        sub_value = sub_details.get("Value")
+                                        if isinstance(sub_value, list) and len(sub_value) == 1:
+                                            processed_item[sub_display_key] = sub_value[0]
+                                        else:
+                                            processed_item[sub_display_key] = sub_value
+                                    sequence_items.append(ModalityLUTSequenceItem(**processed_item))
+                                else:
+                                    # Recursive call to process each item in the sequence
+                                    sequence_items.append(_process_dicom_json_output([item_dict])[0])
                         processed_object[display_key] = sequence_items
                     else:
                         # Extract the value. If 'Value' is a list with a single element, take that element.
