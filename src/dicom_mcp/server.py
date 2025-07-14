@@ -332,70 +332,27 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         Retrieves pixel data for a DICOM instance via DICOMweb (WADO-RS).
         """
         dicom_ctx: DicomContext = ctx.request_context.lifespan_context
-        config = dicom_ctx.config
-
-        if not config or not config.dicomweb_url:
-            raise ValueError("DICOMweb URL is not configured. Please add it to the server configuration.")
-
-        dicomweb_url = (
-            f"{config.dicomweb_url}/studies/{study_instance_uid}/"
-            f"series/{series_instance_uid}/instances/{sop_instance_uid}"
-        )
         
-        logger.info(f"Retrieving DICOM instance from DICOMweb: {dicomweb_url}")
-
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    dicomweb_url, 
-                    headers={"Accept": 'multipart/related; type="application/dicom"'},
-                    timeout=30.0
-                )
-                # This will raise an exception if the status is not 2xx (e.g., 404 Not Found)
-                response.raise_for_status()
+            # Use the new helper function to fetch the dataset
+            ds = await _fetch_dicom_dataset_from_dicomweb(
+                study_instance_uid, series_instance_uid, sop_instance_uid, dicom_ctx
+            )
 
-                # --- COMPLETE PARSING LOGIC ---
-                
-                # Reconstruct headers and body for the parser
-                content_type_header = 'Content-Type: ' + response.headers['Content-Type']
-                full_response_bytes = content_type_header.encode('utf-8') + b'\r\n\r\n' + response.content
-                
-                # Parse the multipart response
-                parser = BytesParser()
-                parsed_msg = parser.parsebytes(full_response_bytes)
+            # Extract pixel information from the fetched dataset
+            pixel_info = _extract_pixel_array_info(ds)
 
-                dicom_bytes = None
-                for part in parsed_msg.walk():
-                    if part.get_content_type() == 'application/dicom':
-                        dicom_bytes = part.get_payload(decode=True)
-                        break
-                
-                if dicom_bytes is None:
-                    raise ValueError("No 'application/dicom' part found in the multipart response.")
+            # If all went well, return the response object
+            return PixelDataResponse(
+                sop_instance_uid=sop_instance_uid,
+                **pixel_info
+            )
 
-                # Use pydicom to read DICOM data from bytes
-                ds = pydicom.dcmread(pydicom.filebase.DicomBytesIO(dicom_bytes), force=True)
-
-                # Extract pixel information
-                pixel_info = _extract_pixel_array_info(ds)
-
-                # If all went well, return the response object
-                return PixelDataResponse(
-                    sop_instance_uid=sop_instance_uid,
-                    **pixel_info
-                )
-                # --- END OF PARSING LOGIC ---
-
-        except httpx.HTTPStatusError as exc:
-            logger.error(f"HTTP error retrieving DICOMweb data: {exc.response.status_code} - {exc.response.text}")
-            raise ValueError(f"HTTP error in DICOMweb: {exc.response.status_code} - {exc.response.text}")
-        
-        except httpx.RequestError as exc:
-            logger.error(f"Network error retrieving DICOMweb data: {exc}")
-            raise ConnectionError(f"Network error in DICOMweb: {exc}")
-        
+        except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as e:
+            # Re-raise specific, handled exceptions from the helper
+            raise e
         except Exception as e:
-            logger.error(f"Error processing DICOMweb data: {e}", exc_info=True)
+            logger.error(f"An unexpected error occurred in get_dicomweb_pixel_data: {e}", exc_info=True)
             raise
 
     @mcp.resource(uri="resource://attribute_presets")
@@ -622,6 +579,63 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             "pixel_array_preview": preview,
             "message": "Pixel data extracted. Preview shown."
         }
+
+    async def _fetch_dicom_dataset_from_dicomweb(
+        study_instance_uid: str,
+        series_instance_uid: str,
+        sop_instance_uid: str,
+        dicom_ctx: DicomContext
+    ) -> pydicom.Dataset:
+        """Fetches a single DICOM dataset from a DICOMweb server and returns it as a pydicom.Dataset object."""
+        config = dicom_ctx.config
+        if not config or not config.dicomweb_url:
+            raise ValueError("DICOMweb URL is not configured.")
+
+        dicomweb_url = (
+            f"{config.dicomweb_url}/studies/{study_instance_uid}/"
+            f"series/{series_instance_uid}/instances/{sop_instance_uid}"
+        )
+        
+        logger.info(f"Fetching DICOM instance from DICOMweb: {dicomweb_url}")
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    dicomweb_url, 
+                    headers={"Accept": 'multipart/related; type="application/dicom"'},
+                    timeout=30.0
+                )
+                response.raise_for_status()
+
+                # Reconstruct headers and body for the parser
+                content_type_header = 'Content-Type: ' + response.headers['Content-Type']
+                full_response_bytes = content_type_header.encode('utf-8') + b'\r\n\r\n' + response.content
+                
+                # Parse the multipart response to find the DICOM part
+                parser = BytesParser()
+                parsed_msg = parser.parsebytes(full_response_bytes)
+
+                dicom_bytes = None
+                for part in parsed_msg.walk():
+                    if part.get_content_type() == 'application/dicom':
+                        dicom_bytes = part.get_payload(decode=True)
+                        break
+                
+                if dicom_bytes is None:
+                    raise ValueError("No 'application/dicom' part found in multipart response.")
+
+                # Read DICOM data from bytes and return the dataset
+                return pydicom.dcmread(pydicom.filebase.DicomBytesIO(dicom_bytes), force=True)
+
+        except httpx.HTTPStatusError as exc:
+            logger.error(f"HTTP error fetching from DICOMweb: {exc.response.status_code} - {exc.response.text}")
+            raise ValueError(f"HTTP error from DICOMweb: {exc.response.status_code} - {exc.response.text}")
+        except httpx.RequestError as exc:
+            logger.error(f"Network error fetching from DICOMweb: {exc}")
+            raise ConnectionError(f"Network error connecting to DICOMweb: {exc}")
+        except Exception as e:
+            logger.error(f"Error processing DICOMweb response: {e}", exc_info=True)
+            raise
 
     @mcp.prompt
     def simple_test_prompt(message: str) -> str:
