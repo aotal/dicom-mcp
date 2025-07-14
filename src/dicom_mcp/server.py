@@ -4,6 +4,7 @@ DICOM MCP Server main implementation.
 
 import logging
 import pydicom
+import numpy as np
 from pydicom.datadict import keyword_for_tag
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ from fastmcp import FastMCP, Context
 from .attributes import ATTRIBUTE_PRESETS
 from .dicom_client import DicomClient
 from .config import DicomConfiguration, load_config
+from .MTF.utils import apply_dicom_linearity
 
 # Configure logging
 logger = logging.getLogger("dicom_mcp")
@@ -340,7 +342,8 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             )
 
             # Extract pixel information from the fetched dataset
-            pixel_info = _extract_pixel_array_info(ds)
+            linearized_pixel_array = apply_dicom_linearity(ds)
+            pixel_info = _extract_pixel_array_info(ds, linearized_pixel_array)
 
             # If all went well, return the response object
             return PixelDataResponse(
@@ -546,14 +549,12 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             processed_results.append(processed_object)
         return processed_results
 
-    def _extract_pixel_array_info(ds: pydicom.Dataset) -> Dict[str, Any]:
+    def _extract_pixel_array_info(ds: pydicom.Dataset, pixel_array: np.ndarray) -> Dict[str, Any]:
         """
         Extracts the pixel array and relevant information from the DICOM dataset.
         """
-        if not hasattr(ds, 'PixelData') or ds.PixelData is None:
+        if pixel_array is None or pixel_array.size == 0:
             raise ValueError("The DICOM instance does not contain pixel data.")
-        
-        pixel_array = ds.pixel_array
         
         preview = None
         if pixel_array.ndim >= 2 and pixel_array.size > 0:

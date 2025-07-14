@@ -10,6 +10,21 @@ import warnings # Para calculate_linearization_slope
 import math # Para convert_to_json_serializable
 
 
+def apply_dicom_linearity(ds: pydicom.Dataset) -> np.ndarray:
+    """Aplica la transformación de linealidad (Rescale Slope/Intercept) a los datos de píxeles."""
+    pixel_array = ds.pixel_array
+    
+    # Obtener pendiente e intercepto, con valores por defecto si no existen
+    slope = float(ds.get("RescaleSlope", 1.0))
+    intercept = float(ds.get("RescaleIntercept", 0.0))
+
+    # Aplicar la transformación solo si es necesario
+    if slope != 1.0 or intercept != 0.0:
+        return pixel_array.astype(np.float64) * slope + intercept
+    else:
+        return pixel_array
+
+
 def escribir_base64(ruta_archivo, cadena_base64):
     """Escribe una cadena Base64 en un archivo de texto.
 
@@ -192,6 +207,37 @@ def Extension(x):
 # obtener_datos_calibracion_vmp_k en lugar del parámetro 'table_data'
 # que era una lista de diccionarios.
 
+def linearize_pixel_array(
+    pixel_array: np.ndarray,
+    calibration_df: pd.DataFrame,
+    rqa_type: str,
+    rqa_factors_dict: dict,
+    epsilon=1e-9
+) -> np.ndarray | None:
+    """
+    Calcula la pendiente de linealización y la aplica a un array de píxeles.
+
+    Args:
+        pixel_array (np.ndarray): El array de píxeles a linealizar.
+        calibration_df (pd.DataFrame): DataFrame con columnas 'K_uGy' y 'VMP'.
+        rqa_type (str): Calidad de radiación (ej: 'RQA5').
+        rqa_factors_dict (dict): Diccionario con factores de SNR_in^2 / 1000.
+        epsilon (float): Pequeño valor para evitar división por cero.
+
+    Returns:
+        np.ndarray: El array de píxeles linealizado.
+    """
+    slope = calculate_linearization_slope(calibration_df, rqa_type, rqa_factors_dict)
+    if slope is None:
+        warnings.warn(f"No se pudo obtener la pendiente para {rqa_type}, la linealización ha fallado.")
+        return None
+    
+    if abs(slope) < epsilon:
+        warnings.warn(f"La pendiente de linealización para {rqa_type} es cercana a cero ({slope:.2e}).")
+        return None
+
+    return pixel_array.astype(np.float64) / slope
+
 def linearize_preprocessed_image_from_df( # Renombrada para claridad
     preprocessed_image: np.ndarray,
     calibration_df: pd.DataFrame, # Ahora recibe el DataFrame
@@ -218,58 +264,15 @@ def linearize_preprocessed_image_from_df( # Renombrada para claridad
     # --- Validación de Entradas ---
     if not isinstance(preprocessed_image, np.ndarray):
         raise TypeError("preprocessed_image debe ser un numpy array.")
-    if not isinstance(calibration_df, pd.DataFrame):
-         raise TypeError("calibration_df debe ser un pandas DataFrame.")
-    if rqa_type not in rqa_factors_dict:
-        raise ValueError(f"rqa_type '{rqa_type}' no encontrado en rqa_factors_dict.")
-    if not all(col in calibration_df.columns for col in ['K_uGy', 'VMP']):
-         raise ValueError("El DataFrame de calibración debe contener columnas 'K_uGy' y 'VMP'.")
-
-    # Asegurar tipo float para cálculos
-    image_float = preprocessed_image.astype(np.float64)
-
-    # --- Calcular Pendiente (Gain post-preprocesado) ---
-    try:
-        snr_in_squared_factor = rqa_factors_dict[rqa_type] * 1000.0
-    except KeyError:
-         raise ValueError(f"Clave RQA '{rqa_type}' no encontrada en el diccionario.")
-
-    # Filtrar puntos con Kerma > 0
-    valid_cal_data = calibration_df[calibration_df['K_uGy'] > epsilon].copy()
-    if valid_cal_data.empty:
-         raise ValueError("No hay puntos de datos válidos (Kerma > 0) en calibration_df.")
-
-    # Calcular x = Quanta/Area, y = VMP
-    valid_cal_data['quanta_per_area'] = valid_cal_data['K_uGy'] * snr_in_squared_factor
-    x_values = valid_cal_data['quanta_per_area'].values
-    y_values = valid_cal_data['VMP'].values # VMP directo (preprocesado)
-
-    # Calcular la pendiente (y = slope' * x)
-    x_col = x_values[:, np.newaxis]
-    try:
-        slopes_prime = y_values / x_values
-        slope_prime = np.mean(slopes_prime)
-        # Alternativa más robusta:
-        # slope_prime = np.linalg.lstsq(x_col, y_values, rcond=None)[0][0]
-    except np.linalg.LinAlgError:
-         raise ValueError("Fallo en el cálculo de mínimos cuadrados para la pendiente.")
-    except ZeroDivisionError:
-         raise ValueError("División por cero al calcular pendientes individuales.")
-
-    if abs(slope_prime) < epsilon:
-        raise ValueError(f"La pendiente calculada ({slope_prime:.2e}) es demasiado cercana a cero.")
-    logging.info(f"Pendiente calculada para {rqa_type}: {slope_prime:.4e}")
-
-    # --- Linealizar Imagen ---
-    try:
-        linearized_image = image_float / slope_prime
-        return linearized_image
-    except ZeroDivisionError:
-         logging.error("Error de división por cero al linealizar.")
-         return None
-    except Exception as e:
-         logging.exception(f"Error inesperado durante la división para linealizar: {e}")
-         return None
+    
+    # La validación de los otros argumentos ahora se hace en linearize_pixel_array
+    return linearize_pixel_array(
+        pixel_array=preprocessed_image,
+        calibration_df=calibration_df,
+        rqa_type=rqa_type,
+        rqa_factors_dict=rqa_factors_dict,
+        epsilon=epsilon
+    )
     
 
 def calculate_simple_vmp(imagen: np.ndarray, fraccion_roi=0.5) -> float:
