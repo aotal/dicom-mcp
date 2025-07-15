@@ -214,17 +214,19 @@ class MtfSingleInstanceResponse(BaseModel):
     vertical_mtf_result: Optional[MtfResultDetail] = None
     horizontal_mtf_result: Optional[MtfResultDetail] = None
 
-class MtfSeriesAnalysisResponse(BaseModel):
-    """Response for the aggregated MTF analysis of a complete series."""
-    status: str
+class MtfSeriesAnalysisResponse(DicomResponseBase):
+    """Modelo para la respuesta del análisis MTF de una serie."""
     processed_files_count: int
     valid_vertical_rois: int
     valid_horizontal_rois: int
-    error_details: Optional[str] = None
     combined_poly_coeffs: Optional[List[float]] = None
     fit_r_squared: Optional[float] = None
     fit_rmse: Optional[float] = None
     mtf_at_50_percent: Optional[float] = None
+    mtf_at_10_percent: Optional[float] = None
+
+    class Config:
+        extra = 'allow'
 
 class FilteredInstanceResult(DicomResponseBase):
     """Model for a single DICOM instance with its most relevant fields."""
@@ -239,4 +241,32 @@ class FilteredInstanceResult(DicomResponseBase):
 
 class FilteredInstanceResultsWrapper(BaseModel):
     """Wrapper for the list of filtered instance results."""
-    result: List[FilteredInstanceResult]  
+    result: List[FilteredInstanceResult]
+
+class NnpsAnalysisResponse(DicomResponseBase):
+    """Modelo para la respuesta del análisis NNPS simplificado."""
+    num_images_processed: Optional[int] = None
+    pixel_spacing_mm: Optional[float] = None
+    mean_kerma_uGy: Optional[float] = None # Kerma promedio calculado de la ROI
+    nnps_1d_radial_freq: Optional[List[float]] = None
+    nnps_1d_radial_values: Optional[List[float]] = None
+    error_details: Optional[str] = None
+
+    class Config:
+        extra = 'allow'    
+
+class NnpsGroupResult(DicomResponseBase):
+    """Modelo para el resultado del análisis NNPS de un único grupo de Kerma."""
+    kerma_group_uGy: float
+    num_images_in_group: int
+    pixel_spacing_mm: Optional[float] = None
+    mean_kerma_uGy: Optional[float] = None
+    nnps_1d_radial_freq: Optional[List[float]] = None
+    nnps_1d_radial_values: Optional[List[float]] = None
+
+class NnpsSeriesAnalysisResponse(DicomResponseBase):
+    """
+    Wrapper para la respuesta completa del análisis NNPS de una serie.
+    Contiene una lista con los resultados de cada grupo de Kerma analizado.
+    """
+    groups_analyzed: List[NnpsGroupResult] = []        

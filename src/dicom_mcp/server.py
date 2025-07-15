@@ -10,7 +10,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Any, AsyncIterator
-from .models import PixelDataResponse, DicomNodeInfo, DicomNodeListResponse, OperationStatusResponse, ConnectionVerificationResponse, PatientQueryResult, StudyResponse, SeriesResponse, AttributePresetDetails, AttributePresetsResponse, QidoResponse, PatientQueryResultsWrapper, StudyQueryResultsWrapper, SeriesQueryResultsWrapper, QidoQueryResultsWrapper, ModalityLUTSequenceModel, ModalityLUTSequenceItem, MtfSingleInstanceResponse, MtfSeriesAnalysisResponse, FilteredInstanceResultsWrapper, FilteredInstanceResult
+from .models import PixelDataResponse, DicomNodeInfo, DicomNodeListResponse, OperationStatusResponse, ConnectionVerificationResponse, PatientQueryResult, StudyResponse, SeriesResponse, AttributePresetDetails, AttributePresetsResponse, QidoResponse, PatientQueryResultsWrapper, StudyQueryResultsWrapper, SeriesQueryResultsWrapper, QidoQueryResultsWrapper, ModalityLUTSequenceModel, ModalityLUTSequenceItem, MtfSingleInstanceResponse, MtfSeriesAnalysisResponse, FilteredInstanceResultsWrapper, FilteredInstanceResult, NnpsSeriesAnalysisResponse, NnpsGroupResult, NnpsAnalysisResponse
 import httpx # Import httpx for DICOMweb operations
 from email.message import Message
 from email.parser import BytesParser
@@ -22,6 +22,10 @@ from .dicom_client import DicomClient
 from .config import DicomConfiguration, load_config
 from .MTF.utils import apply_dicom_linearity
 from .mtf_processor_wrapper import process_mtf_from_datasets
+from .nnps_processor_wrapper import process_series_for_nnps, process_nnps_for_group 
+
+
+
 
 @dataclass
 class DicomContext:
@@ -923,7 +927,101 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 fit_r_squared=None,
                 fit_rmse=None,
                 mtf_at_50_percent=None
-            )  
+            ) 
+    @mcp.tool
+    async def calculate_nnps_from_instances(
+        study_instance_uid: str,
+        series_instance_uid: str,
+        sop_instance_uids: List[str],
+        ctx: Context
+    ) -> NnpsAnalysisResponse:
+        """
+        Calcula el NNPS para una lista explícita de instancias, tratándolas como un único grupo.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        
+        try:
+            await ctx.info(f"Iniciando análisis NNPS para {len(sop_instance_uids)} instancias...")
+            
+            datasets_to_process = []
+            for i, sop_uid in enumerate(sop_instance_uids):
+                progress = 10 + (i / len(sop_instance_uids)) * 90
+                await ctx.report_progress(progress=progress, total=100, message=f"Descargando instancia {i+1}/{len(sop_instance_uids)}")
+                
+                ds = await _fetch_dicom_dataset_from_dicomweb(
+                    study_instance_uid.strip(), series_instance_uid.strip(), sop_uid.strip(), dicom_ctx
+                )
+                datasets_to_process.append(ds)
+
+            await ctx.info("Procesando datos para NNPS...")
+            
+            # --- LLAMADA CORREGIDA ---
+            # Llama a la función específica para procesar un grupo.
+            results = process_nnps_for_group(datasets=datasets_to_process)
+            
+            return NnpsAnalysisResponse(**results)
+
+        except Exception as e:
+            logger.error(f"Fallo en el análisis NNPS: {e}", exc_info=True)
+            await ctx.error(f"Fallo en el análisis NNPS: {e}")
+            return NnpsAnalysisResponse(status="Error", error_details=str(e))
+        
+    @mcp.tool
+    async def analyze_nnps_for_series(
+        study_instance_uid: str,
+        series_instance_uid: str,
+        ctx: Context
+    ) -> NnpsSeriesAnalysisResponse:
+        """
+        Encuentra todas las instancias FDT en una serie, las agrupa por Kerma
+        y calcula el NNPS para cada grupo con 2 o más imágenes.
+        """
+        dicom_ctx = ctx.request_context.lifespan_context
+        clean_study_uid = study_instance_uid.strip()
+        clean_series_uid = series_instance_uid.strip()
+
+        try:
+            await ctx.info(f"Buscando instancias FDT en la serie {clean_series_uid}...")
+            
+            qido_level = f"studies/{clean_study_uid}/series/{clean_series_uid}/instances"
+            query_params = {"ImageComments": "FDT", "includefield": "SOPInstanceUID"}
+            all_instances = await _internal_qido_query(query_level, query_params, dicom_ctx)
+            
+            fdt_instances_uids = [inst.get('SOPInstanceUID') for inst in all_instances if inst.get("ImageComments") == "FDT" and inst.get('SOPInstanceUID')]
+            
+            if not fdt_instances_uids:
+                raise ValueError("No se encontraron instancias con ImageComments='FDT'.")
+
+            await ctx.info(f"Se encontraron {len(fdt_instances_uids)} instancias. Descargando...")
+            
+            datasets_to_process = []
+            for i, sop_uid in enumerate(fdt_instances_uids):
+                progress = 10 + (i / len(fdt_instances_uids)) * 85
+                await ctx.report_progress(progress=progress, total=100, message=f"Descargando instancia {i+1}/{len(fdt_instances_uids)}")
+                ds = await _fetch_dicom_dataset_from_dicomweb(clean_study_uid, clean_series_uid, sop_uid.strip(), dicom_ctx)
+                datasets_to_process.append(ds)
+
+            await ctx.info("Procesando datos para NNPS...")
+            
+            # --- LLAMADA CORRECTA ---
+            # Llama a la función que realiza la agrupación por Kerma.
+            results = process_series_for_nnps(datasets=datasets_to_process)
+            
+            if results.get("status") != "OK":
+                raise RuntimeError(results.get("error_details", "Error desconocido en el procesador NNPS."))
+
+            analyzed_groups = results.get("groups_analyzed", [])
+
+            if not analyzed_groups:
+                return NnpsSeriesAnalysisResponse(status="OK", error_details="Análisis completado, pero no se formaron grupos con suficientes imágenes (se requieren >= 2 por grupo).", groups_analyzed=[])
+
+            return NnpsSeriesAnalysisResponse(status="OK", groups_analyzed=[NnpsGroupResult(**g) for g in analyzed_groups])
+
+        except Exception as e:
+            error_message = f"Fallo en el flujo de análisis NNPS para la serie {clean_series_uid}: {e}"
+            logger.error(error_message, exc_info=True)
+            await ctx.error(error_message)
+            return NnpsSeriesAnalysisResponse(status="Error", error_details=str(e))          
     return mcp
 
     
