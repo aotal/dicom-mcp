@@ -7,31 +7,33 @@ from typing import Optional, List, Dict, Any, Tuple
 class DicomResponseBase(BaseModel):
     """
     A base model that automatically converts non-primitive Python data types to strings.
-    This generically handles all special pydicom types.
+    This is crucial for handling various `pydicom` specific types (e.g., IS, DS, PN, UID)
+    and ensuring they are JSON serializable.
     """
     @field_validator('*', mode='before')
     @classmethod
     def convert_non_primitive_types_to_str(cls, v: Any) -> Any:
-        # --- CORRECTED LOGIC ---
-        # Define a set with the exact basic types we don't want to touch.
+        """
+        Converts any value that is not a basic Python type (str, int, float, list, dict, tuple, None)
+        into its string representation.
+
+        Args:
+            v: The value to validate and potentially convert.
+
+        Returns:
+            The original value if it's a base type, otherwise its string representation.
+        """
         base_types = {str, int, float, list, dict, tuple, type(None)}
-        
-        # Check if the EXACT TYPE of the value is not in our list of base types.
         if type(v) not in base_types:
-            # If it's a special pydicom type (IS, DS, PN, UID, etc.),
-            # we convert it to a pure string for Pydantic.
             return str(v)
-        
-        # If it's already a basic type, we return it unchanged.
         return v
 
     class Config:
         from_attributes = True
 
 # --- RESPONSE MODELS INHERITING FROM THE BASE MODEL ---
-# No changes needed, as they inherit the correct logic.
-
 class StudyResponse(DicomResponseBase):
+    """Represents a single study record from a DICOM query."""
     StudyInstanceUID: str
     PatientID: Optional[str] = None
     PatientName: Optional[str] = None
@@ -41,9 +43,11 @@ class StudyResponse(DicomResponseBase):
     AccessionNumber: Optional[str] = None
 
 class StudyQueryResultsWrapper(BaseModel):
+    """A wrapper for a list of study query results."""
     result: List[StudyResponse]
 
 class SeriesResponse(DicomResponseBase):
+    """Represents a single series record from a DICOM query."""
     StudyInstanceUID: str
     SeriesInstanceUID: str
     Modality: Optional[str] = None
@@ -52,25 +56,27 @@ class SeriesResponse(DicomResponseBase):
     PatientName: Optional[str] = None
 
 class SeriesQueryResultsWrapper(BaseModel):
+    """A wrapper for a list of series query results."""
     result: List[SeriesResponse]
 
-# --- The rest of the models do not need changes ---
 class LUTExplanationModel(BaseModel):
+    """Represents the parsed explanation of a Modality LUT."""
     FullText: Optional[str] = Field(None)
     Explanation: Optional[str] = Field(None)
     InCalibRange: Optional[Tuple[float, float]] = Field(None)
     OutLUTRange: Optional[Tuple[float, float]] = Field(None)
 
 class InstanceMetadataResponse(BaseModel):
+    """Represents metadata for a single DICOM instance."""
     SOPInstanceUID: str
     InstanceNumber: Optional[str] = None
-    # Change to Optional and default value to None
     dicom_headers: Optional[Dict[str, Any]] = None
 
     class Config:
-        from_attributes = True # Ensure this is present if you use validation from object attributes
+        from_attributes = True
 
 class PixelDataResponse(BaseModel):
+    """Represents the extracted pixel data and its properties from a DICOM instance."""
     sop_instance_uid: str
     rows: int
     columns: int
@@ -80,66 +86,72 @@ class PixelDataResponse(BaseModel):
     message: Optional[str] = None
 
 class MoveRequest(BaseModel):
+    """Represents a request to move a DICOM entity (study, series, or instance)."""
     study_instance_uid: str
     series_instance_uid: Optional[str] = None
     sop_instance_uid: Optional[str] = None
 
 class MoveRequestItem(BaseModel):
+    """Represents a single instance to be moved in a bulk operation."""
     study_instance_uid: str
     series_instance_uid: str
     sop_instance_uid: str
 
 class BulkMoveRequest(BaseModel):
+    """Represents a request to move a list of DICOM instances."""
     instances_to_move: List[MoveRequestItem]
 
 # --- New proposed models ---
-
-# For list_dicom_nodes
 class DicomNodeInfo(BaseModel):
+    """Represents information about a configured DICOM node."""
     name: str
     description: str
 
 class DicomNodeListResponse(BaseModel):
+    """Response model for listing all configured DICOM nodes."""
     current_node: str
     nodes: List[DicomNodeInfo]
 
-# For switch_dicom_node
 class OperationStatusResponse(BaseModel):
+    """Generic response model for operations that return a success status and a message."""
     success: bool
     message: str
 
-# For verify_connection
 class ConnectionVerificationResponse(BaseModel):
+    """Response model for the C-ECHO verification tool."""
     message: str
 
-# For query_patients
 class PatientQueryResult(DicomResponseBase):
+    """Represents a single patient record from a DICOM query."""
     PatientID: str
     PatientName: Optional[str] = None
     PatientBirthDate: Optional[str] = None
     PatientSex: Optional[str] = None
 
 class PatientQueryResultsWrapper(BaseModel):
+    """A wrapper for a list of patient query results."""
     result: List[PatientQueryResult]
-    # Add other common patient fields you expect in the response
 
-# For get_attribute_presets
 class AttributePresetDetails(BaseModel):
+    """Details of the DICOM attributes included in each preset level."""
     minimal: List[str]
     standard: List[str]
     extended: List[str]
 
 class AttributePresetsResponse(BaseModel):
+    """Response model for listing available attribute presets."""
     patient: AttributePresetDetails
     study: AttributePresetDetails
     series: AttributePresetDetails
     instance: AttributePresetDetails
 
 class QidoResponse(DicomResponseBase):
+    """A flexible response model for QIDO-RS queries, allowing any extra fields."""
     class Config:
         extra = 'allow'
 
 class ModalityLUTSequenceItem(DicomResponseBase):
+    """Represents an item within the ModalityLUTSequence."""
     LUTDescriptor: Optional[List[int]] = None
     ModalityLUTType: Optional[str] = None
     LUTExplanation: Optional[Dict[str, Any]] = None
@@ -147,12 +159,15 @@ class ModalityLUTSequenceItem(DicomResponseBase):
     @field_validator('LUTExplanation', mode='before')
     @classmethod
     def parse_lut_explanation(cls, v: Any, info: FieldValidationInfo) -> Optional[Dict[str, Any]]:
+        """
+        Parses the string value of LUTExplanation into a structured dictionary.
+        """
         if isinstance(v, str):
             explanation_str = v
             
-            kerma_match = re.search(r"Kerma\s*(?P<unit>[a-zA-Z]+)\s*\(SF=(?P<dfd>\d+)\)", explanation_str)
-            in_calib_range_match = re.search(r"InCalibRange:(?P<min>\d+\.\d+)-(?P<max>\d+\.\d+)", explanation_str)
-            out_lut_range_match = re.search(r"OutLUTRange:(?P<min>\d+)-(?P<max>\d+)", explanation_str)
+            kerma_match = re.search(r"Kerma\\s*(?P<unit>[a-zA-Z]+)\\s*\\(SF=(?P<dfd>\\d+)\\)", explanation_str)
+            in_calib_range_match = re.search(r"InCalibRange:(?P<min>\\d+\\.\\d+)-(?P<max>\\d+\\.\\d+)", explanation_str)
+            out_lut_range_match = re.search(r"OutLUTRange:(?P<min>\\d+)-(?P<max>\\d+)", explanation_str)
 
             parsed_data = {}
             if kerma_match:
@@ -174,15 +189,16 @@ class ModalityLUTSequenceItem(DicomResponseBase):
         return v
 
 class ModalityLUTSequenceModel(DicomResponseBase):
+    """Represents the full ModalityLUTSequence."""
     ModalityLUTSequence: Optional[List[ModalityLUTSequenceItem]] = None
 
 class QidoQueryResultsWrapper(BaseModel):
+    """A wrapper for a list of QIDO-RS query results."""
     result: List[QidoResponse]
 
 # --- MTF Analysis Models ---
-
 class MtfResultDetail(BaseModel):
-    """Contiene los resultados detallados de un único análisis MTF (para una ROI)."""
+    """Contains the detailed results of a single MTF analysis for one ROI."""
     status: str
     roi_id: str
     pixel_spacing: float
@@ -191,7 +207,7 @@ class MtfResultDetail(BaseModel):
     mtf: Optional[List[float]] = None
 
 class MtfSingleInstanceResponse(BaseModel):
-    """Respuesta para el análisis MTF de una única instancia DICOM."""
+    """Response for the MTF analysis of a single DICOM instance."""
     status: str
     sop_instance_uid: str
     error_details: Optional[str] = None
@@ -199,7 +215,7 @@ class MtfSingleInstanceResponse(BaseModel):
     horizontal_mtf_result: Optional[MtfResultDetail] = None
 
 class MtfSeriesAnalysisResponse(BaseModel):
-    """Respuesta para el análisis MTF agregado de una serie completa."""
+    """Response for the aggregated MTF analysis of a complete series."""
     status: str
     processed_files_count: int
     valid_vertical_rois: int
@@ -211,16 +227,16 @@ class MtfSeriesAnalysisResponse(BaseModel):
     mtf_at_50_percent: Optional[float] = None
 
 class FilteredInstanceResult(DicomResponseBase):
-    """Modelo para una única instancia DICOM con sus campos más relevantes."""
+    """Model for a single DICOM instance with its most relevant fields."""
     SOPInstanceUID: Optional[str] = None
     InstanceNumber: Optional[str] = None
     ImageComments: Optional[str] = None
-    PatientName: Optional[Any] = None # Puede ser un objeto
+    PatientName: Optional[Any] = None
     StudyDescription: Optional[str] = None
     
     class Config:
-        extra = 'allow' # Permite campos extra que no estén definidos
+        extra = 'allow'
 
 class FilteredInstanceResultsWrapper(BaseModel):
-    """Wrapper para la lista de resultados de instancias filtradas."""
+    """Wrapper for the list of filtered instance results."""
     result: List[FilteredInstanceResult]  

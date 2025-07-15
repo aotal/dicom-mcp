@@ -26,23 +26,21 @@ class DicomClient:
     """DICOM networking client that handles communication with DICOM nodes."""
     
     def __init__(self, host: str, port: int, calling_aet: str, called_aet: str):
-        """Initialize DICOM client.
+        """Initialize the DICOM client.
         
         Args:
-            host: DICOM node hostname or IP
-            port: DICOM node port
-            calling_aet: Local AE title (our AE title)
-            called_aet: Remote AE title (the node we're connecting to)
+            host: The hostname or IP address of the remote DICOM node.
+            port: The port number of the remote DICOM node.
+            calling_aet: The Application Entity Title (AET) of this client.
+            called_aet: The Application Entity Title (AET) of the remote node.
         """
         self.host = host
         self.port = port
         self.called_aet = called_aet
         self.calling_aet = calling_aet
         
-        # Create the Application Entity
         self.ae = AE(ae_title=calling_aet)
         
-        # Add the necessary presentation contexts
         self.ae.add_requested_context(Verification)
         self.ae.add_requested_context(PatientRootQueryRetrieveInformationModelFind)
         self.ae.add_requested_context(PatientRootQueryRetrieveInformationModelGet)
@@ -51,19 +49,15 @@ class DicomClient:
         
     
     def verify_connection(self) -> Tuple[bool, str]:
-        """Verify connectivity to the DICOM node using C-ECHO.
+        """Verify connectivity to the DICOM node using a C-ECHO request.
         
         Returns:
-            Tuple of (success, message)
+            A tuple containing a boolean indicating success and a message.
         """
-        # Associate with the DICOM node
         assoc = self.ae.associate(self.host, self.port, ae_title=self.called_aet)
         
         if assoc.is_established:
-            # Send C-ECHO request
             status = assoc.send_c_echo()
-            
-            # Release the association
             assoc.release()
             
             if status and status.Status == 0:
@@ -77,16 +71,15 @@ class DicomClient:
         """Execute a C-FIND request.
         
         Args:
-            query_dataset: Dataset containing query parameters
-            query_model: DICOM query model (Patient/StudyRoot)
+            query_dataset: A pydicom Dataset containing the query parameters.
+            query_model: The DICOM query model to use (e.g., PatientRootQueryRetrieveInformationModelFind).
         
         Returns:
-            List of dictionaries containing query results
+            A list of dictionaries, where each dictionary represents a matched record.
         
         Raises:
-            Exception: If association fails
+            Exception: If the association with the DICOM node fails.
         """
-        # Associate with the DICOM node
         assoc = self.ae.associate(self.host, self.port, ae_title=self.called_aet)
         
         if not assoc.is_established:
@@ -95,7 +88,6 @@ class DicomClient:
         results = []
         
         try:
-            # Send C-FIND request
             responses = assoc.send_c_find(query_dataset, query_model)
             
             for (status, dataset) in responses:
@@ -103,7 +95,6 @@ class DicomClient:
                     if dataset:
                         results.append(self._dataset_to_dict(dataset))
         finally:
-            # Always release the association
             assoc.release()
         
         return results
@@ -112,31 +103,27 @@ class DicomClient:
                      birth_date: str = None, attribute_preset: str = "standard",
                      additional_attrs: List[str] = None, exclude_attrs: List[str] = None,
                      additional_filters: Dict[str, str] = None) -> List[Dict[str, Any]]:
-        """Query for patients matching criteria.
+        """Query for patients matching the specified criteria.
         
         Args:
-            patient_id: Patient ID
-            name_pattern: Patient name pattern (can include wildcards * and ?)
-            birth_date: Patient birth date (YYYYMMDD)
-            attribute_preset: Attribute preset (minimal, standard, extended)
-            additional_attrs: Additional attributes to include
-            exclude_attrs: Attributes to exclude
-            additional_filters: Dictionary of additional DICOM tags to use for filtering
+            patient_id: The patient's ID.
+            name_pattern: A pattern for the patient's name (can include wildcards).
+            birth_date: The patient's birth date in YYYYMMDD format.
+            attribute_preset: The attribute preset to use ('minimal', 'standard', 'extended').
+            additional_attrs: A list of additional attributes to include in the result.
+            exclude_attrs: A list of attributes to exclude from the result.
+            additional_filters: A dictionary of additional DICOM tags to use for filtering.
             
         Returns:
-            List of matching patient records
+            A list of matching patient records.
         """
-        # Create query dataset
         ds = Dataset()
         ds.QueryRetrieveLevel = "PATIENT"
         
-        # Add query parameters if provided
         if patient_id:
             ds.PatientID = patient_id
-            
         if name_pattern:
             ds.PatientName = name_pattern
-            
         if birth_date:
             ds.PatientBirthDate = birth_date
 
@@ -144,13 +131,11 @@ class DicomClient:
             for key, value in additional_filters.items():
                 setattr(ds, key, value)
         
-        # Add attributes based on preset
         attrs = get_attributes_for_level("patient", attribute_preset, additional_attrs, exclude_attrs)
         for attr in attrs:
             if not hasattr(ds, attr):
                 setattr(ds, attr, "")
         
-        # Execute query
         return self.find(ds, PatientRootQueryRetrieveInformationModelFind)
     
     def query_study(self, patient_id: str = None, study_date: str = None, 
@@ -158,43 +143,36 @@ class DicomClient:
                    accession_number: str = None, study_instance_uid: str = None,
                    attribute_preset: str = "standard", additional_attrs: List[str] = None, 
                    exclude_attrs: List[str] = None, additional_filters: Dict[str, str] = None) -> List[Dict[str, Any]]:
-        """Query for studies matching criteria.
+        """Query for studies matching the specified criteria.
         
         Args:
-            patient_id: Patient ID
-            study_date: Study date or range (YYYYMMDD or YYYYMMDD-YYYYMMDD)
-            modality: Modalities in study
-            study_description: Study description (can include wildcards)
-            accession_number: Accession number
-            study_instance_uid: Study Instance UID
-            attribute_preset: Attribute preset (minimal, standard, extended)
-            additional_attrs: Additional attributes to include
-            exclude_attrs: Attributes to exclude
-            additional_filters: Dictionary of additional DICOM tags to use for filtering
+            patient_id: The patient's ID.
+            study_date: The study date or a date range (YYYYMMDD or YYYYMMDD-YYYYMMDD).
+            modality: The modality of the study.
+            study_description: A pattern for the study description.
+            accession_number: The accession number of the study.
+            study_instance_uid: The Study Instance UID.
+            attribute_preset: The attribute preset to use.
+            additional_attrs: A list of additional attributes to include.
+            exclude_attrs: A list of attributes to exclude.
+            additional_filters: A dictionary of additional DICOM tags for filtering.
             
         Returns:
-            List of matching study records
+            A list of matching study records.
         """
-        # Create query dataset
         ds = Dataset()
         ds.QueryRetrieveLevel = "STUDY"
         
-        # Add query parameters if provided
         if patient_id:
             ds.PatientID = patient_id
-            
         if study_date:
             ds.StudyDate = study_date
-            
         if modality:
             ds.ModalitiesInStudy = modality
-            
         if study_description:
             ds.StudyDescription = study_description
-            
         if accession_number:
             ds.AccessionNumber = accession_number
-            
         if study_instance_uid:
             ds.StudyInstanceUID = study_instance_uid
 
@@ -202,13 +180,11 @@ class DicomClient:
             for key, value in additional_filters.items():
                 setattr(ds, key, value)
         
-        # Add attributes based on preset
         attrs = get_attributes_for_level("study", attribute_preset, additional_attrs, exclude_attrs)
         for attr in attrs:
             if not hasattr(ds, attr):
                 setattr(ds, attr, "")
         
-        # Execute query
         return self.find(ds, StudyRootQueryRetrieveInformationModelFind)
     
     def query_series(self, study_instance_uid: str, series_instance_uid: str = None,
@@ -216,37 +192,32 @@ class DicomClient:
                     series_description: str = None, attribute_preset: str = "standard",
                     additional_attrs: List[str] = None, exclude_attrs: List[str] = None,
                     additional_filters: Dict[str, str] = None) -> List[Dict[str, Any]]:
-        """Query for series matching criteria.
+        """Query for series matching the specified criteria.
         
         Args:
-            study_instance_uid: Study Instance UID (required)
-            series_instance_uid: Series Instance UID
-            modality: Modality (e.g. "CT", "MR")
-            series_number: Series number
-            series_description: Series description (can include wildcards)
-            attribute_preset: Attribute preset (minimal, standard, extended)
-            additional_attrs: Additional attributes to include
-            exclude_attrs: Attributes to exclude
-            additional_filters: Dictionary of additional DICOM tags to use for filtering
+            study_instance_uid: The Study Instance UID (required).
+            series_instance_uid: The Series Instance UID.
+            modality: The modality of the series (e.g., 'CT', 'MR').
+            series_number: The series number.
+            series_description: A pattern for the series description.
+            attribute_preset: The attribute preset to use.
+            additional_attrs: A list of additional attributes to include.
+            exclude_attrs: A list of attributes to exclude.
+            additional_filters: A dictionary of additional DICOM tags for filtering.
             
         Returns:
-            List of matching series records
+            A list of matching series records.
         """
-        # Create query dataset
         ds = Dataset()
         ds.QueryRetrieveLevel = "SERIES"
         ds.StudyInstanceUID = study_instance_uid
         
-        # Add query parameters if provided
         if series_instance_uid:
             ds.SeriesInstanceUID = series_instance_uid
-            
         if modality:
             ds.Modality = modality
-            
         if series_number:
             ds.SeriesNumber = series_number
-            
         if series_description:
             ds.SeriesDescription = series_description
 
@@ -254,42 +225,37 @@ class DicomClient:
             for key, value in additional_filters.items():
                 setattr(ds, key, value)
         
-        # Add attributes based on preset
         attrs = get_attributes_for_level("series", attribute_preset, additional_attrs, exclude_attrs)
         for attr in attrs:
             if not hasattr(ds, attr):
                 setattr(ds, attr, "")
         
-        # Execute query
         return self.find(ds, StudyRootQueryRetrieveInformationModelFind)
     
     def query_instance(self, series_instance_uid: str, sop_instance_uid: str = None,
                       instance_number: str = None, attribute_preset: str = "standard",
                       additional_attrs: List[str] = None, exclude_attrs: List[str] = None,
                       additional_filters: Dict[str, str] = None) -> List[Dict[str, Any]]:
-        """Query for instances matching criteria.
+        """Query for instances matching the specified criteria.
         
         Args:
-            series_instance_uid: Series Instance UID (required)
-            sop_instance_uid: SOP Instance UID
-            instance_number: Instance number
-            attribute_preset: Attribute preset (minimal, standard, extended)
-            additional_attrs: Additional attributes to include
-            exclude_attrs: Attributes to exclude
-            additional_filters: Dictionary of additional DICOM tags to use for filtering
+            series_instance_uid: The Series Instance UID (required).
+            sop_instance_uid: The SOP Instance UID.
+            instance_number: The instance number.
+            attribute_preset: The attribute preset to use.
+            additional_attrs: A list of additional attributes to include.
+            exclude_attrs: A list of attributes to exclude.
+            additional_filters: A dictionary of additional DICOM tags for filtering.
             
         Returns:
-            List of matching instance records
+            A list of matching instance records.
         """
-        # Create query dataset
         ds = Dataset()
         ds.QueryRetrieveLevel = "IMAGE"
         ds.SeriesInstanceUID = series_instance_uid
         
-        # Add query parameters if provided
         if sop_instance_uid:
             ds.SOPInstanceUID = sop_instance_uid
-            
         if instance_number:
             ds.InstanceNumber = instance_number
 
@@ -297,24 +263,22 @@ class DicomClient:
             for key, value in additional_filters.items():
                 setattr(ds, key, value)
         
-        # Add attributes based on preset
         attrs = get_attributes_for_level("instance", attribute_preset, additional_attrs, exclude_attrs)
         for attr in attrs:
             if not hasattr(ds, attr):
                 setattr(ds, attr, "")
         
-        # Execute query
         return self.find(ds, StudyRootQueryRetrieveInformationModelFind)
 
     @staticmethod
     def _dataset_to_dict(dataset: Dataset) -> Dict[str, Any]:
-        """Convert a DICOM dataset to a dictionary.
+        """Convert a pydicom Dataset to a dictionary.
         
         Args:
-            dataset: DICOM dataset
+            dataset: The pydicom Dataset to convert.
             
         Returns:
-            Dictionary representation of the dataset
+            A dictionary representation of the dataset.
         """
         if hasattr(dataset, "is_empty") and dataset.is_empty():
             return {}
@@ -322,20 +286,15 @@ class DicomClient:
         result = {}
         for elem in dataset:
             if elem.VR == "SQ":
-                # Handle sequences
                 result[elem.keyword] = [DicomClient._dataset_to_dict(item) for item in elem.value]
             else:
-                # Handle regular elements
                 if hasattr(elem, "keyword"):
                     try:
                         if elem.VM > 1:
-                            # Multiple values
                             result[elem.keyword] = list(elem.value)
                         else:
-                            # Single value
                             result[elem.keyword] = elem.value
                     except Exception:
-                        # Fall back to string representation
                         result[elem.keyword] = str(elem.value)
         
         return result

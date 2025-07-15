@@ -12,7 +12,18 @@ from .config import DicomConfiguration, DicomNodeConfig
 logger = logging.getLogger(__name__)
 
 def handle_store(event, storage_dir: Path):
-    """Handler for the evt.EVT_C_STORE event in the receiving SCP."""
+    """Handler for the evt.EVT_C_STORE event.
+
+    This function is called when a C-STORE request is received. It saves the
+    incoming DICOM dataset to the specified storage directory.
+
+    Args:
+        event: The event instance containing the dataset and association information.
+        storage_dir: The directory where the received DICOM files will be stored.
+
+    Returns:
+        A DICOM status code (0x0000 for success).
+    """
     try:
         ds = event.dataset
         
@@ -44,15 +55,29 @@ def handle_store(event, storage_dir: Path):
         return 0xC001 # Error: Cannot process
 
 def handle_echo(event):
-    """Handler for the evt.EVT_C_ECHO event."""
+    """Handler for the evt.EVT_C_ECHO event.
+
+    This function is called when a C-ECHO request is received. It logs the request
+    and returns a success status.
+
+    Args:
+        event: The event instance.
+
+    Returns:
+        A DICOM status code (0x0000 for success).
+    """
     calling_ae = getattr(event.assoc.ae, 'calling_ae_title', 'Unknown')
     logger.info(f"Received C-ECHO from {calling_ae}")
     return 0x0000 
 
 def start_scp_server(config: DicomConfiguration, callback=None):
-    """
-    Starts the C-STORE SCP server. This function is blocking.
-    If a callback is provided, it is called with the AE server instance.
+    """Starts the C-STORE SCP (Service Class Provider) server.
+
+    This function is blocking and will run until the process is terminated.
+
+    Args:
+        config: The DicomConfiguration object.
+        callback: An optional callback function to be called with the AE server instance.
     """
     
     scp_node_config = config.nodes.get('local_scp')
@@ -67,7 +92,6 @@ def start_scp_server(config: DicomConfiguration, callback=None):
         logger.error(f"Could not create DICOM reception directory at '{storage_dir}': {e}")
         return
 
-    # Create a partial function for the C-STORE handler that includes the storage directory
     from functools import partial
     bound_handle_store = partial(handle_store, storage_dir=storage_dir)
 

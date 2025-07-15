@@ -1,12 +1,14 @@
 """
 DICOM attribute presets for different query levels.
+
+This module defines sets of DICOM attributes that can be requested during
+C-FIND queries. Presets for 'minimal', 'standard', and 'extended' levels
+of detail are provided for patient, study, series, and instance queries.
 """
 
 from typing import Dict, List, Optional
 
-# Dictionary of attribute presets for each query level
 ATTRIBUTE_PRESETS = {
-    # Minimal attribute set - just essential identifiers
     "minimal": {
         "patient": [
             "PatientID",
@@ -31,7 +33,6 @@ ATTRIBUTE_PRESETS = {
         ],
     },
     
-    # Standard attribute set - common clinical attributes
     "standard": {
         "patient": [
             "PatientID",
@@ -76,7 +77,6 @@ ATTRIBUTE_PRESETS = {
         ],
     },
     
-    # Extended attribute set - comprehensive information
     "extended": {
         "patient": [
             "PatientID",
@@ -151,7 +151,6 @@ ATTRIBUTE_PRESETS = {
     },
 }
 
-
 def get_attributes_for_level(
     level: str, 
     preset: str = "standard", 
@@ -159,33 +158,29 @@ def get_attributes_for_level(
     exclude_attrs: Optional[List[str]] = None
 ) -> List[str]:
     """Get the list of attributes for a specific query level and preset.
-    
+
+    This function combines attributes from a specified preset with any additional
+    attributes provided, and removes any attributes marked for exclusion.
+
     Args:
-        level: Query level (patient, study, series, instance)
-        preset: Attribute preset name (minimal, standard, extended)
-        additional_attrs: Additional attributes to include
-        exclude_attrs: Attributes to exclude
-        
+        level: The query level ('patient', 'study', 'series', 'instance').
+        preset: The name of the attribute preset ('minimal', 'standard', 'extended').
+        additional_attrs: A list of additional attributes to include in the result.
+        exclude_attrs: A list of attributes to exclude from the result.
+
     Returns:
-        List of DICOM attribute names
+        A list of DICOM attribute names.
     """
-    # Start with the preset attributes
     if preset in ATTRIBUTE_PRESETS and level in ATTRIBUTE_PRESETS[preset]:
         attr_list = ATTRIBUTE_PRESETS[preset][level].copy()
-    elif preset in ATTRIBUTE_PRESETS and level not in ATTRIBUTE_PRESETS[preset]:
-        # If preset exists but doesn't have this level, fall back to standard
-        attr_list = ATTRIBUTE_PRESETS["standard"][level].copy()
     else:
-        # If preset doesn't exist, fall back to standard
         attr_list = ATTRIBUTE_PRESETS["standard"][level].copy()
     
-    # Add additional attributes
     if additional_attrs:
         for attr in additional_attrs:
             if attr not in attr_list:
                 attr_list.append(attr)
     
-    # Remove excluded attributes
     if exclude_attrs:
         attr_list = [attr for attr in attr_list if attr not in exclude_attrs]
     

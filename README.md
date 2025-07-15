@@ -1,84 +1,139 @@
-# DICOM Model Context Protocol (MCP) Server
+# DICOM MCP Server
 
-[![PyPI - Version](https://img.shields.io/pypi/v/dicom-mcp)](https://pypi.org/project/dicom-mcp/)
-[![Python Version](https://img.shields.io/pypi/pyversions/dicom-mcp)](https://pypi.org/project/dicom-mcp/)
-[![License](https://img.shields.io/github/license/your-repo/dicom-mcp)](LICENSE)
+A powerful, high-performance [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for interacting with DICOM PACS archives. This project provides a bridge between modern AI models and standard medical imaging systems, supporting both DICOMweb (QIDO-RS, WADO-RS) and traditional DIMSE (C-FIND, C-ECHO) protocols.
 
-## Overview
+Built with [**FastMCP**](https://gofastmcp.com/), `pynetdicom`, and `httpx`.
 
-This project implements a DICOM Model Context Protocol (MCP) server, providing a robust and flexible interface for interacting with DICOM (Digital Imaging and Communications in Medicine) servers. It abstracts the complexities of DICOM networking, allowing for seamless integration with various medical imaging systems (PACS, workstations, etc.).
+> **Note**: This project was originally forked from [ChristianHinge/dicom-mcp](https://github.com/ChristianHinge/dicom-mcp).
 
-This project was originally forked from [Christian Hinge's dicom-mcp](https://github.com/dchristyan/dicom-mcp) and is now maintained by Antonio Otal.
+## ✨ Key Features
 
-The server is built using Python and leverages `pynetdicom` for DICOM communication and `FastMCP` for its core server framework.
+* **Dual Protocol Support**: Interact with your PACS using modern, web-friendly **DICOMweb** services or traditional **DIMSE** operations.
 
-## Key Features
+* **Dynamic Node Management**: Switch between multiple configured PACS nodes (`list_dicom_nodes`, `switch_dicom_node`) and verify connectivity (`verify_connection`) on the fly.
 
-The DICOM MCP Server offers a comprehensive set of functionalities for managing and querying DICOM data:
+* **Advanced Querying**:
 
-*   **DICOM Node Management**: 
-    *   List all configured DICOM nodes.
-    *   Switch between different DICOM nodes for operations.
-    *   Verify connectivity to DICOM nodes using C-ECHO.
+  * A generic and powerful **QIDO-RS** query tool (`qido_web_query`) for flexible searches.
 
-*   **Query & Retrieve (C-FIND)**:
-    *   **Patient Queries**: Search for patient records based on various criteria (ID, name, birth date).
-    *   **Study Queries**: Find studies by patient ID, date, modality, description, accession number, or Study Instance UID.
-    *   **Series Queries**: Query series within a specific study by modality, series number, description, or Series Instance UID.
-    *   **Instance Queries**: Retrieve specific instances within a series.
-    *   **Attribute Presets**: Utilize predefined attribute sets (minimal, standard, extended) for query results, with options to include/exclude additional attributes.
+  * Helper tools for standard C-FIND queries at the Patient, Study, and Series levels.
 
-*   **DICOMweb Integration (QIDO-RS, WADO-RS)**:
-    *   **QIDO-RS Queries**: Perform QIDO-RS queries to retrieve studies, series, or instances directly from a configured DICOMweb server. Supports expansion of predefined attribute sets.
-    *   **WADO-RS Image Retrieval**: Fetch DICOM instances via WADO-RS and extract pixel data, providing image dimensions, data type, and a preview of the pixel array.
+* **Advanced Image Analysis**: Includes a high-level tool (`analyze_mtf_for_series`) to perform complete **Modulation Transfer Function (MTF)** analysis on an entire DICOM series with a single call.
 
-*   **DICOM C-STORE SCP**: 
-    *   Includes a DICOM Storage SCP (Service Class Provider) that can receive and store DICOM files from other DICOM entities.
+* **Configuration-Driven**: Easily configure all your DICOM nodes and server settings in a simple `configuration.yaml` file.
 
-*   **LLM Integration Prompts**: 
-    *   Generate structured prompts for Large Language Models (LLMs) to summarize patient studies or explain DICOM query results in a user-friendly manner.
+* **Structured & Validated I/O**: Leverages Pydantic models for all tool inputs and outputs, ensuring data consistency and clear API contracts.
 
-## Configuration
+## ⚙️ Configuration
 
-The server's behavior and DICOM node connections are managed through a `configuration.yaml` file. This file defines:
+Before running the server, you must create a `configuration.yaml` file. The server will look for this file in the `src/dicom_mcp/` directory by default.
 
-*   **`nodes`**: A dictionary of DICOM nodes, each with a `host`, `port`, `ae_title` (Application Entity Title), and an optional `description`.
-*   **`current_node`**: The name of the currently active DICOM node for operations.
-*   **`calling_aet`**: The AE title that this MCP server will use when initiating DICOM connections.
-*   **`local_storage_dir`**: The directory where received DICOM files will be stored by the SCP.
-*   **`dicomweb_url`**: The base URL for the DICOMweb server to be used for QIDO-RS and WADO-RS operations.
+Here is an example `configuration.yaml`:
 
-An example `configuration.yaml` is provided in `src/dicom_mcp/configuration.yaml`.
+```yaml
+# DICOM nodes this server can connect to
+nodes:
+  pacs_local:
+    host: 127.0.0.1
+    port: 11112
+    ae_title: "DCM4CHEE"
+    description: "Local dcm4chee-arc-light instance."
+  orthanc_test:
+    host: 192.168.1.100
+    port: 4242
+    ae_title: "ORTHANC"
+    description: "Orthanc test server."
 
-## Data Models
+# The node to use on startup
+current_node: "pacs_local"
 
-The project uses `Pydantic` for data validation and serialization, defining clear and robust models for DICOM responses and requests. The `DicomResponseBase` model includes a universal validator to convert non-primitive Python data types (especially `pydicom` specific types) to strings for consistent output.
+# The AE Title this MCP server will use when initiating connections
+calling_aet: "DICOM_MCP"
 
-## Getting Started
+# Base URL for the DICOMweb services (QIDO-RS, WADO-RS)
+dicomweb_url: "http://localhost:8080/dcm4chee-arc/aets/DCM4CHEE/rs"
 
-To run the DICOM MCP server:
+# Timeout in seconds for DICOMweb HTTP requests
+dicomweb_timeout: 60.0
 
-1.  **Install Dependencies**: Ensure you have all required Python packages installed (e.g., `pynetdicom`, `fastmcp`, `pydicom`, `httpx`, `pyyaml`, `pydantic`, `numpy`). You can typically install them via `pip install -r requirements.txt` (assuming a `requirements.txt` is generated from `pyproject.toml`).
+# Directory for storing files (e.g., received via C-STORE SCP)
+local_storage_dir: "./dicom_storage"
+```
 
-2.  **Configure**: Edit the `src/dicom_mcp/configuration.yaml` file to define your DICOM nodes and DICOMweb URL.
+## 🚀 Installation and Running the Server
 
-3.  **Run the Server**: Execute the main script:
+1.  **Install the package**:
+
+    For regular use, install the package from the root of the repository:
+
     ```bash
+    pip install .
+    ```
+
+    For development, install in editable mode:
+
+    ```bash
+    pip install -e .
+    ```
+
+2.  **Run the server**:
+
+    You can run the server from your terminal. By default, it uses the `stdio` transport, but you can also specify `sse` for Server-Sent Events.
+
+    ```bash
+    # Run with stdio transport
     python -m src.dicom_mcp
+
+    # Run with SSE transport
+    python -m src.dicom_mcp --transport sse
     ```
-    You can specify a custom configuration path and transport protocol:
-    ```bash
-    python -m src.dicom_mcp /path/to/your/config.yaml --transport sse
-    ```
 
-## Documentation
+## 🛠️ Available Tools (API Reference)
 
-The `doc/` directory contains additional documentation and notes:
+This server exposes a powerful set of tools through the MCP protocol. Here are some of the key tools available:
 
-*   `llms-full.txt`: Full LLM related content.
-*   `prompts.md`: Details on prompt generation for LLMs.
-*   `tool2resource.md`: Information on tool to resource mapping.
+### Node Management
 
-## Contribution
+* **`list_dicom_nodes()`**: Lists all DICOM nodes configured in `configuration.yaml` and indicates which one is currently active.
 
-Contributions are welcome! Please refer to the project's `.github/workflows/release.yml` for CI/CD setup and `pyproject.toml` for project dependencies. Follow standard Python development practices and ensure tests pass before submitting pull requests.
+* **`switch_dicom_node(node_name: str)`**: Switches the active DICOM connection to another configured node.
+
+* **`verify_connection()`**: Performs a DICOM C-ECHO to verify connectivity with the currently active node.
+
+### DICOMweb Querying
+
+* **`qido_web_query(query_level: str, query_params: dict)`**: A generic and powerful tool to perform any QIDO-RS query.
+
+  * `query_level`: The resource path (e.g., `studies`, `series`, `studies/{uid}/instances`).
+
+  * `query_params`: A dictionary with filter criteria (e.g., `{"PatientName": "DOE*", "includefield": "PatientID"}`).
+
+* **`find_mtf_instances_in_series(study_instance_uid: str, series_instance_uid: str)`**: A high-level tool that finds and returns **only** the instances within a series that have `ImageComments` set to "MTF".
+
+  > **Note**: This tool internally performs a broad query and then filters the results. This ensures accuracy even if the PACS does not support filtering on the `ImageComments` attribute.
+
+### MTF Analysis
+
+* **`analyze_mtf_for_series(study_instance_uid: str, series_instance_uid: str)`**: The main workflow tool. It automatically finds all instances with `ImageComments` = "MTF" in the specified series, downloads their data in memory, and returns a complete, averaged MTF analysis.
+
+* **`calculate_mtf_from_instances(study_instance_uid: str, series_instance_uid: str, sop_instance_uids: List[str])`**: A lower-level tool that calculates the averaged MTF for an explicit list of SOP Instance UIDs.
+
+## 🏛️ Architecture Overview
+
+* **MCP Framework**: [FastMCP](https://gofastmcp.com/) is used to create the server, tools, and resources.
+
+* **DIMSE Protocol**: [pynetdicom](https://github.com/pydicom/pynetdicom) is used for traditional DICOM networking (C-FIND, C-ECHO).
+
+* **DICOMweb Protocol**: [httpx](https://www.python-httpx.org/) is used for making modern RESTful requests to QIDO-RS and WADO-RS endpoints.
+
+* **Configuration**: [PyYAML](https://pyyaml.org/) and [Pydantic](https://docs.pydantic.dev/) are used for loading and validating the `configuration.yaml` file.
+
+* **DICOM File Handling**: [pydicom](https://github.com/pydicom/pydicom) is used for reading and parsing DICOM datasets.
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a pull request or open an issue to discuss potential changes.
+
+## 📄 License
+
+This project is licensed under the MIT License. See the `LICENSE` file for details.

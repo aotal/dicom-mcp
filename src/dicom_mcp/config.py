@@ -9,7 +9,14 @@ from pydantic import BaseModel
 
 
 class DicomNodeConfig(BaseModel):
-    """Configuration for a DICOM node"""
+    """Configuration for a single DICOM node (e.g., a PACS).
+
+    Attributes:
+        host: The hostname or IP address of the DICOM node.
+        port: The port number of the DICOM node.
+        ae_title: The Application Entity Title (AET) of the DICOM node.
+        description: An optional description for the node.
+    """
     host: str
     port: int
     ae_title: str
@@ -17,26 +24,35 @@ class DicomNodeConfig(BaseModel):
 
 
 class DicomConfiguration(BaseModel):
-    """Complete DICOM configuration"""
+    """Complete DICOM configuration for the MCP server.
+
+    Attributes:
+        nodes: A dictionary of all configured DICOM nodes, keyed by a unique name.
+        current_node: The name of the currently active DICOM node for operations.
+        calling_aet: The Application Entity Title (AET) that this MCP server will use.
+        local_storage_dir: The directory where received DICOM files will be stored.
+        dicomweb_url: The base URL for the DICOMweb server.
+        dicomweb_timeout: The timeout in seconds for DICOMweb requests.
+    """
     nodes: Dict[str, DicomNodeConfig]
     current_node: str
     calling_aet: str
     local_storage_dir: str = "./dicom_received"
     dicomweb_url: str
-    dicomweb_timeout: float = 30.0  # Timeout en segundos para peticiones DICOMweb
+    dicomweb_timeout: float = 30.0
 
 def load_config(config_path: str) -> DicomConfiguration:
-    """Load DICOM configuration from YAML file.
+    """Load DICOM configuration from a YAML file.
     
     Args:
-        config_path: Path to the configuration file
+        config_path: Path to the configuration file.
         
     Returns:
-        Parsed DicomConfiguration object
+        A parsed DicomConfiguration object.
         
     Raises:
-        FileNotFoundError: If the configuration file doesn't exist
-        ValueError: If the configuration is invalid
+        FileNotFoundError: If the configuration file doesn't exist.
+        ValueError: If the configuration is invalid.
     """
     path = Path(config_path)
     if not path.exists():

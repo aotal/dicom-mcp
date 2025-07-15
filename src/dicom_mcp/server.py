@@ -50,7 +50,25 @@ async def _fetch_dicom_dataset_from_dicomweb(
     sop_instance_uid: str,
     dicom_ctx: DicomContext
 ) -> pydicom.Dataset:
-    """Fetches a single DICOM dataset from a DICOMweb server and returns it as a pydicom.Dataset object."""
+    """Fetches a single DICOM dataset from a DICOMweb server using WADO-RS.
+
+    This function constructs the WADO-RS URL, sends a GET request to retrieve
+    the DICOM instance as a multipart response, parses it, and returns a
+    pydicom.Dataset object.
+
+    Args:
+        study_instance_uid: The Study Instance UID of the desired instance.
+        series_instance_uid: The Series Instance UID of the desired instance.
+        sop_instance_uid: The SOP Instance UID of the desired instance.
+        dicom_ctx: The DICOM context containing configuration.
+
+    Returns:
+        A pydicom.Dataset object for the requested DICOM instance.
+
+    Raises:
+        ValueError: If the DICOMweb URL is not configured or the response is invalid.
+        ConnectionError: If a network error occurs.
+    """
     config = dicom_ctx.config
     if not config or not config.dicomweb_url:
         raise ValueError("DICOMweb URL is not configured.")
@@ -64,21 +82,16 @@ async def _fetch_dicom_dataset_from_dicomweb(
 
     try:
         async with httpx.AsyncClient() as client:
-            # --- MODIFICACIÓN CLAVE AQUÍ ---
-            # Usamos el timeout desde la configuración en lugar de un valor fijo.
             response = await client.get(
                 dicomweb_url, 
                 headers={"Accept": 'multipart/related; type="application/dicom"'},
                 timeout=config.dicomweb_timeout 
             )
-            # --- FIN DE LA MODIFICACIÓN ---
             response.raise_for_status()
 
-            # Reconstruct headers and body for the parser
             content_type_header = 'Content-Type: ' + response.headers['Content-Type']
             full_response_bytes = content_type_header.encode('utf-8') + b'\r\n\r\n' + response.content
             
-            # Parse the multipart response to find the DICOM part
             parser = BytesParser()
             parsed_msg = parser.parsebytes(full_response_bytes)
 
@@ -91,7 +104,6 @@ async def _fetch_dicom_dataset_from_dicomweb(
             if dicom_bytes is None:
                 raise ValueError("No 'application/dicom' part found in multipart response.")
 
-            # Read DICOM data from bytes and return the dataset
             return pydicom.dcmread(pydicom.filebase.DicomBytesIO(dicom_bytes), force=True)
 
     except httpx.HTTPStatusError as exc:
@@ -109,20 +121,30 @@ async def _perform_qido_web_query(
     query_params: Dict[str, Any],
     config: DicomConfiguration
 ) -> List[Dict[str, Any]]:
-    """
-    Función auxiliar para realizar una consulta QIDO-RS.
+    """Helper function to perform a QIDO-RS query.
+
+    Args:
+        query_level: The DICOM level to query ('studies', 'series', etc.).
+        query_params: A dictionary of query parameters.
+        config: The DICOM configuration object.
+
+    Returns:
+        A list of dictionaries representing the query results.
+
+    Raises:
+        ValueError: If the DICOMweb URL is not configured or the query level is invalid.
+        ConnectionError: If a network error occurs.
     """
     if not config.dicomweb_url:
         raise ValueError("DICOMweb URL is not configured. Please set 'dicomweb_url' in configuration.yaml")
 
-    base_url = config.dicomweb_url.rstrip('/') # Ensure no trailing slash
+    base_url = config.dicomweb_url.rstrip('/')
 
     if query_level.startswith("studies/") or query_level in ["studies", "series", "instances"]:
         qido_url = f"{base_url}/{query_level}"
     else:
         raise ValueError(f"Invalid query_level: {query_level}. Must be 'studies', 'series', 'instances' or follow 'studies/{{uid}}/series' pattern.")
 
-    # Prepare query parameters, expanding includefield if present
     processed_params = query_params.copy() if query_params else {}
     if 'includefield' in processed_params:
         expanded_fields = []
@@ -158,29 +180,32 @@ async def _perform_qido_web_query(
             raise
 
 def _process_dicom_json_output(json_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Procesa la salida JSON de una consulta QIDO-RS para simplificar su estructura.
-    Convierte el formato {"tag": {"vr": "...", "Value": [...]}} a {"keyword": "value"}.
+    """Processes the JSON output of a QIDO-RS query to simplify its structure.
+
+    Converts the format {"tag": {"vr": "...", "Value": [...]}} to {"keyword": "value"}.
+
+    Args:
+        json_data: The raw JSON data from the QIDO-RS response.
+
+    Returns:
+        A list of processed dictionaries with keywords as keys.
     """
     processed_list = []
     if not isinstance(json_data, list):
-        # A veces, la respuesta puede no ser una lista si hay un error o no hay resultados
         return []
 
     for item in json_data:
         processed_item = {}
         for tag, data in item.items():
-            keyword = keyword_for_tag(tag) # Convierte (0010,0010) a "PatientName"
-            if keyword: # Solo procesa si el tag tiene una palabra clave conocida
+            keyword = keyword_for_tag(tag)
+            if keyword:
                 value = data.get("Value", [])
-                # Si 'Value' es una lista, toma el primer elemento si es único, o la lista completa.
-                # Esto maneja tanto atributos de valor único como múltiple.
                 if len(value) == 1:
                     processed_item[keyword] = value[0]
                 elif len(value) > 1:
                     processed_item[keyword] = value
                 else:
-                    processed_item[keyword] = None # O un valor por defecto que prefieras
+                    processed_item[keyword] = None
 
         processed_list.append(processed_item)
     return processed_list        
@@ -188,21 +213,24 @@ def _process_dicom_json_output(json_data: List[Dict[str, Any]]) -> List[Dict[str
 # Configure logging
 logger = logging.getLogger("dicom_mcp")
 
-# En src/dicom_mcp/server.py, junto a las otras funciones auxiliares
-
 def _create_dataset_from_dicomweb(metadata: List[Dict[str, Any]], pixel_data: bytes) -> pydicom.Dataset:
-    """Crea un objeto pydicom.Dataset en memoria a partir de metadatos JSON y píxeles crudos."""
+    """Creates a pydicom.Dataset object in memory from JSON metadata and raw pixel data.
+
+    Args:
+        metadata: A list of dictionaries containing DICOM tag metadata.
+        pixel_data: The raw pixel data as bytes.
+
+    Returns:
+        A pydicom.Dataset object.
+    """
     ds = pydicom.Dataset()
     for tag_data in metadata:
         for tag, values in tag_data.items():
-            # pydicom necesita el tag como un objeto Tag, no como string
             pydicom.dataset.Dataset.add_new(ds, tag, values.get('vr'), values.get('Value'))
     
-    # Añadir los datos de píxeles
     ds.PixelData = pixel_data
-    # Es crucial definir la metainformación para que pydicom pueda interpretar los píxeles
     ds.file_meta = pydicom.Dataset()
-    ds.file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian # O el que corresponda
+    ds.file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian
     ds.is_little_endian = True
     ds.is_implicit_VR = True
     
@@ -215,36 +243,37 @@ async def _fetch_instance_data_from_dicomweb(
     sop_instance_uid: str,
     dicom_ctx: DicomContext
 ) -> pydicom.Dataset:
-    """
-    Obtiene los metadatos y los píxeles de una instancia vía DICOMweb y los combina
-    en un objeto pydicom.Dataset en memoria.
+    """Fetches metadata and pixel data for an instance via DICOMweb and combines them into a pydicom.Dataset.
+
+    Args:
+        study_instance_uid: The Study Instance UID.
+        series_instance_uid: The Series Instance UID.
+        sop_instance_uid: The SOP Instance UID.
+        dicom_ctx: The DICOM context containing the configuration.
+
+    Returns:
+        A pydicom.Dataset object created from the fetched data.
+
+    Raises:
+        ValueError: If the DICOMweb URL is not configured.
     """
     config = dicom_ctx.config
     if not config or not config.dicomweb_url:
-        raise ValueError("DICOMweb URL no está configurado.")
+        raise ValueError("DICOMweb URL is not configured.")
 
     base_url = f"{config.dicomweb_url}/studies/{study_instance_uid}/series/{series_instance_uid}/instances/{sop_instance_uid}"
     
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # 1. Obtener metadatos en formato JSON
         logger.info(f"Fetching metadata from: {base_url}/metadata")
         metadata_response = await client.get(f"{base_url}/metadata", headers={"Accept": "application/dicom+json"})
         metadata_response.raise_for_status()
         metadata_json = metadata_response.json()
 
-        # 2. Obtener los píxeles crudos
         logger.info(f"Fetching pixel data from: {base_url}/rendered")
-        # Pedimos los píxeles renderizados en un formato simple (PNG) y luego los leemos
-        # o podríamos pedir `application/octet-stream` si el procesador lo soporta.
-        # Por simplicidad, este ejemplo asume que tu procesador MTF puede manejar arrays de una imagen renderizada.
-        # Si necesita el 'application/octet-stream' original, el cliente debe estar preparado para decodificarlo.
         pixel_response = await client.get(base_url, headers={"Accept": "application/octet-stream"})
         pixel_response.raise_for_status()
         pixel_data = pixel_response.content
         
-        # 3. Crear el Dataset en memoria
-        # Esta es una simplificación. Crear un dataset desde cero requiere más tags.
-        # Nos enfocaremos en pasar los tags que necesita tu procesador MTF.
         ds = pydicom.Dataset()
         for tag_info in metadata_json:
             tag_id = next(iter(tag_info))
@@ -252,10 +281,8 @@ async def _fetch_instance_data_from_dicomweb(
             vr = tag_data['vr']
             value = tag_data.get('Value', [])
             
-            # Convertir el tag string a un objeto pydicom.tag.Tag si es necesario
             tag = pydicom.tag.Tag(tag_id)
             
-            # pydicom espera que el valor sea correcto para el VR
             if vr == 'US':
                 value = [int(v) for v in value]
             elif vr == 'DS':
@@ -264,16 +291,13 @@ async def _fetch_instance_data_from_dicomweb(
             ds.add_new(tag, vr, value)
 
         ds.PixelData = pixel_data
-        # Es crucial añadir metainformación para que pydicom sepa cómo leer los píxeles
         ds.file_meta = pydicom.FileMetaDataset()
-        ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian # Ajustar si es necesario
+        ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
         ds.is_little_endian = True
         ds.is_implicit_VR = False
 
-        # Asegurarse de que los tags necesarios para el procesado MTF estén presentes
         if 'PixelSpacing' not in ds:
-             # Añadir un valor por defecto o lanzar un error si es crítico
-             logger.warning("PixelSpacing no encontrado en metadatos, usando valor por defecto 1.0")
+             logger.warning("PixelSpacing not found in metadata, using default value 1.0")
              ds.PixelSpacing = [1.0, 1.0]
         if 'RescaleSlope' not in ds:
             ds.RescaleSlope = 1
@@ -285,14 +309,25 @@ async def _fetch_instance_data_from_dicomweb(
 async def _internal_qido_query(
     query_level: str,
     query_params: Dict[str, Any],
-    dicom_ctx: 'DicomContext' # Usamos DicomContext directamente
+    dicom_ctx: 'DicomContext'
 ) -> List[Dict[str, Any]]:
-    """
-    Función interna para realizar la consulta QIDO-RS. Es llamada por las herramientas.
+    """Internal function to perform a QIDO-RS query, called by tools.
+
+    Args:
+        query_level: The DICOM level to query.
+        query_params: A dictionary of query parameters.
+        dicom_ctx: The DICOM context.
+
+    Returns:
+        A list of dictionaries representing the query results.
+
+    Raises:
+        ValueError: If the DICOMweb URL is not configured.
+        ConnectionError: If a network error occurs.
     """
     config = dicom_ctx.config
     if not config.dicomweb_url:
-        raise ValueError("La URL de DICOMweb no está configurada.")
+        raise ValueError("DICOMweb URL is not configured.")
 
     cleaned_query_level = query_level.strip()
     base_url = config.dicomweb_url.rstrip('/')
@@ -316,7 +351,7 @@ async def _internal_qido_query(
                 expanded_fields.append(field)
         processed_params['includefield'] = ",".join(expanded_fields)
 
-    logger.info(f"Realizando consulta QIDO-RS interna a: {qido_url} con params: {processed_params}")
+    logger.info(f"Performing internal QIDO-RS query to: {qido_url} with params: {processed_params}")
 
     async with httpx.AsyncClient() as client:
         try:
@@ -329,42 +364,48 @@ async def _internal_qido_query(
             response.raise_for_status()
             return _process_dicom_json_output(response.json())
         except httpx.HTTPStatusError as exc:
-            raise ValueError(f"Error HTTP del servidor DICOMweb: {exc.response.status_code} - {exc.response.text}")
+            raise ValueError(f"HTTP error from DICOMweb server: {exc.response.status_code} - {exc.response.text}")
         except httpx.RequestError as exc:
-            raise ConnectionError(f"Error de red al conectar con DICOMweb: {exc}")
+            raise ConnectionError(f"Network error connecting to DICOMweb: {exc}")
         
 
 def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMCP:
-    """Create and configure a DICOM MCP server."""
+    """Create and configure a DICOM MCP server.
+
+    Args:
+        config_path: Path to the configuration YAML file.
+        name: The name of the MCP server.
+
+    Returns:
+        An instance of the FastMCP server.
+    """
     
-    # Define a simple lifespan function
     @asynccontextmanager
     async def lifespan(server: FastMCP) -> AsyncIterator[DicomContext]:
-        # Load config
+        """Manages the lifecycle of the DICOM server context.
+
+        Args:
+            server: The FastMCP server instance.
+
+        Yields:
+            A DicomContext object.
+        """
         config = load_config(config_path)
-        
-        # Get the current node and calling AE title
         current_node = config.nodes[config.current_node]
-        
-        # Create client
         client = DicomClient(
             host=current_node.host,
             port=current_node.port,
             calling_aet=config.calling_aet,
             called_aet=current_node.ae_title
         )
-        
         logger.info(f"DICOM client initialized: {config.current_node} (calling AE: {config.calling_aet})")
-        
         try:
             yield DicomContext(config=config, client=client)
         finally:
             pass
     
-    # Create server
     mcp = FastMCP(name, lifespan=lifespan)
     
-    # Register tools
     @mcp.resource(uri="resource://dicom_nodes")
     def list_dicom_nodes(ctx: Context = None) -> DicomNodeListResponse:
         """List all configured DICOM nodes and their connection information.
@@ -374,15 +415,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         information about available calling AE titles.
         
         Returns:
-            Dictionary containing:
-            - current_node: The currently selected DICOM node name
-            - nodes: List of all configured node names
-        
-        Example:
-            {
-                "current_node": "pacs1",
-                "nodes": ["pacs1", "pacs2", "orthanc"],
-            }
+            A DicomNodeListResponse object containing the current node and a list of all nodes.
         """
         dicom_ctx = ctx.request_context.lifespan_context
         config = dicom_ctx.config
@@ -404,36 +437,24 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         will connect to. The node must be defined in the configuration file.
         
         Args:
-            node_name: The name of the node to switch to, must match a name in the configuration
+            node_name: The name of the node to switch to, must match a name in the configuration.
+            ctx: The context object provided by FastMCP.
         
         Returns:
-            Dictionary containing:
-            - success: Boolean indicating if the switch was successful
-            - message: Description of the operation result or error
-        
-        Example:
-            {
-                "success": true,
-                "message": "Switched to DICOM node: orthanc"
-            }
+            An OperationStatusResponse indicating the result of the switch.
         
         Raises:
-            ValueError: If the specified node name is not found in configuration
+            ValueError: If the specified node name is not found in configuration.
         """        
         dicom_ctx = ctx.request_context.lifespan_context
         config = dicom_ctx.config
         
-        # Check if node exists
         if node_name not in config.nodes:
             raise ValueError(f"Node '{node_name}' not found in configuration")
         
-        # Update configuration
         config.current_node = node_name
-        
-        # Create a new client with the updated configuration
         current_node = config.nodes[config.current_node]
         
-        # Replace the client with a new instance
         dicom_ctx.client = DicomClient(
             host=current_node.host,
             port=current_node.port,
@@ -454,11 +475,11 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         if the currently selected DICOM node is reachable and responds correctly. This is
         useful to troubleshoot connection issues before attempting other operations.
         
+        Args:
+            ctx: The context object provided by FastMCP.
+
         Returns:
-            A message describing the connection status, including host, port, and AE titles
-        
-        Example:
-            "Connection successful to 192.168.1.100:104 (Called AE: ORTHANC, Calling AE: CLIENT)"
+            A ConnectionVerificationResponse with a message describing the connection status.
         """
         dicom_ctx = ctx.request_context.lifespan_context
         client = dicom_ctx.client
@@ -484,22 +505,20 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         be combined for more specific queries.
         
         Args:
-            name_pattern: Patient name pattern (can include wildcards * and ?), e.g., "SMITH*"
-            patient_id: Patient ID to search for, e.g., "12345678"
-            birth_date: Patient birth date in YYYYMMDD format, e.g., "19700101"
-            attribute_preset: Controls which attributes to include in results:
-                - "minimal": Only essential attributes
-                - "standard": Common attributes (default)
-                - "extended": All available attributes
-            additional_attributes: List of specific DICOM attributes to include beyond the preset
-            exclude_attributes: List of DICOM attributes to exclude from the results
-            additional_filters: Dictionary of additional DICOM tags to use for filtering, e.g., {"PatientSex": "F"}
+            name_pattern: Patient name pattern (can include wildcards * and ?).
+            patient_id: Patient ID to search for.
+            birth_date: Patient birth date in YYYYMMDD format.
+            attribute_preset: Controls which attributes to include in results ('minimal', 'standard', 'extended').
+            additional_attributes: List of specific DICOM attributes to include beyond the preset.
+            exclude_attributes: List of DICOM attributes to exclude from the results.
+            additional_filters: Dictionary of additional DICOM tags to use for filtering.
+            ctx: The context object provided by FastMCP.
         
         Returns:
-            List of dictionaries, each representing a matched patient with their attributes
+            A PatientQueryResultsWrapper containing a list of matched patients.
         
         Raises:
-            Exception: If there is an error communicating with the DICOM node
+            Exception: If there is an error communicating with the DICOM node.
         """
         dicom_ctx = ctx.request_context.lifespan_context
         client = dicom_ctx.client
@@ -535,22 +554,23 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         """Query studies matching the specified criteria from the DICOM node.
         
         Args:
-            patient_id: Patient ID to search for, e.g., "12345678"
-            study_date: Study date or date range in DICOM format: "20230101" or "20230101-20230131"
-            modality_in_study: Filter by modalities present in study, e.g., "CT" or "MR"
-            study_description: Study description text (can include wildcards), e.g., "CHEST*"
-            accession_number: Medical record accession number
-            study_instance_uid: Unique identifier for a specific study
-            attribute_preset: Controls which attributes to include in results
-            additional_attributes: List of specific DICOM attributes to include beyond the preset
-            exclude_attributes: List of DICOM attributes to exclude from the results
-            additional_filters: Dictionary of additional DICOM tags to use for filtering
+            patient_id: Patient ID to search for.
+            study_date: Study date or date range in DICOM format.
+            modality_in_study: Filter by modalities present in the study.
+            study_description: Study description text (can include wildcards).
+            accession_number: Medical record accession number.
+            study_instance_uid: Unique identifier for a specific study.
+            attribute_preset: Controls which attributes to include in results.
+            additional_attributes: List of specific DICOM attributes to include beyond the preset.
+            exclude_attributes: List of DICOM attributes to exclude from the results.
+            additional_filters: Dictionary of additional DICOM tags to use for filtering.
+            ctx: The context object provided by FastMCP.
         
         Returns:
-            List of dictionaries, each representing a matched study with its attributes
+            A StudyQueryResultsWrapper containing a list of matched studies.
         
         Raises:
-            Exception: If there is an error communicating with the DICOM node
+            Exception: If there is an error communicating with the DICOM node.
         """
         dicom_ctx = ctx.request_context.lifespan_context
         client = dicom_ctx.client
@@ -588,21 +608,22 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         """Query series within a study from the DICOM node.
         
         Args:
-            study_instance_uid: Unique identifier for the study (required)
-            modality: Filter by imaging modality, e.g., "CT", "MR", "US", "CR"
-            series_number: Filter by series number
-            series_description: Series description text (can include wildcards), e.g., "AXIAL*"
-            series_instance_uid: Unique identifier for a specific series
-            attribute_preset: Controls which attributes to include in results
-            additional_attributes: List of specific DICOM attributes to include beyond the preset
-            exclude_attributes: List of DICOM attributes to exclude from the results
-            additional_filters: Dictionary of additional DICOM tags to use for filtering
+            study_instance_uid: Unique identifier for the study (required).
+            modality: Filter by imaging modality (e.g., 'CT', 'MR').
+            series_number: Filter by series number.
+            series_description: Series description text (can include wildcards).
+            series_instance_uid: Unique identifier for a specific series.
+            attribute_preset: Controls which attributes to include in results.
+            additional_attributes: List of specific DICOM attributes to include beyond the preset.
+            exclude_attributes: List of DICOM attributes to exclude from the results.
+            additional_filters: Dictionary of additional DICOM tags to use for filtering.
+            ctx: The context object provided by FastMCP.
         
         Returns:
-            List of dictionaries, each representing a matched series with its attributes
+            A SeriesQueryResultsWrapper containing a list of matched series.
         
         Raises:
-            Exception: If there is an error communicating with the DICOM node
+            Exception: If there is an error communicating with the DICOM node.
         """
         dicom_ctx = ctx.request_context.lifespan_context
         client = dicom_ctx.client
@@ -623,8 +644,6 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         except Exception as e:
             raise Exception(f"Error querying series: {str(e)}")
 
-    
-
     @mcp.resource("dicomweb://studies/{study_instance_uid}/series/{series_instance_uid}/instances/{sop_instance_uid}/pixeldata")
     async def get_dicomweb_pixel_data(
         study_instance_uid: str,
@@ -632,29 +651,36 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         sop_instance_uid: str,
         ctx: Context
     ) -> PixelDataResponse:
-        """
-        Retrieves pixel data for a DICOM instance via DICOMweb (WADO-RS).
+        """Retrieves pixel data for a DICOM instance via DICOMweb (WADO-RS).
+
+        Args:
+            study_instance_uid: The Study Instance UID.
+            series_instance_uid: The Series Instance UID.
+            sop_instance_uid: The SOP Instance UID.
+            ctx: The context object provided by FastMCP.
+
+        Returns:
+            A PixelDataResponse object containing information about the pixel data.
+
+        Raises:
+            Exception: If an error occurs during the DICOMweb request.
         """
         dicom_ctx: DicomContext = ctx.request_context.lifespan_context
         
         try:
-            # Use the new helper function to fetch the dataset
             ds = await _fetch_dicom_dataset_from_dicomweb(
                 study_instance_uid, series_instance_uid, sop_instance_uid, dicom_ctx
             )
 
-            # Extract pixel information from the fetched dataset
             linearized_pixel_array = apply_dicom_linearity(ds)
             pixel_info = _extract_pixel_array_info(ds, linearized_pixel_array)
 
-            # If all went well, return the response object
             return PixelDataResponse(
                 sop_instance_uid=sop_instance_uid,
                 **pixel_info
             )
 
         except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as e:
-            # Re-raise specific, handled exceptions from the helper
             raise e
         except Exception as e:
             logger.error(f"An unexpected error occurred in get_dicomweb_pixel_data: {e}", exc_info=True)
@@ -669,9 +695,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         preset (minimal, standard, extended) for each query level.
         
         Returns:
-            Dictionary organized by query level (patient, study, series, instance),
-            with each level containing the attribute presets and their associated
-            DICOM attributes.
+            An AttributePresetsResponse object containing the presets for each query level.
         """
         
         presets_by_level = {}
@@ -688,17 +712,21 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             instance=AttributePresetDetails(**presets_by_level["instance"])
         )
 
-
-# Reemplaza tu herramienta qido_web_query en src/dicom_mcp/server.py con esta:
-
     @mcp.tool
     async def qido_web_query(
         query_level: str,
         query_params: Dict[str, Any] = None,
         ctx: Context = None
     ) -> QidoQueryResultsWrapper:
-        """
-        Realiza una consulta QIDO-RS genérica al servidor DICOMweb configurado.
+        """Performs a generic QIDO-RS query to the configured DICOMweb server.
+
+        Args:
+            query_level: The DICOM level to query (e.g., 'studies', 'series').
+            query_params: A dictionary of query parameters.
+            ctx: The context object provided by FastMCP.
+
+        Returns:
+            A QidoQueryResultsWrapper containing the results of the query.
         """
         dicom_ctx = ctx.request_context.lifespan_context
         results = await _internal_qido_query(query_level, query_params, dicom_ctx)
@@ -710,76 +738,83 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         series_instance_uid: str,
         ctx: Context = None
     ) -> FilteredInstanceResultsWrapper:
-        """
-        Busca y devuelve SOLO las instancias de una serie que tengan ImageComments='MTF'.
+        """Finds and returns only the instances in a series with ImageComments='MTF'.
+
+        Args:
+            study_instance_uid: The Study Instance UID.
+            series_instance_uid: The Series Instance UID.
+            ctx: The context object provided by FastMCP.
+
+        Returns:
+            A FilteredInstanceResultsWrapper containing the MTF instances.
         """
         dicom_ctx = ctx.request_context.lifespan_context
         
-        await ctx.info(f"Buscando instancias MTF en la serie {series_instance_uid.strip()}...")
+        await ctx.info(f"Searching for MTF instances in series {series_instance_uid.strip()}...")
 
-        # 1. Construir la consulta QIDO (sabemos que puede devolver resultados extra)
         query_level = f"studies/{study_instance_uid.strip()}/series/{series_instance_uid.strip()}/instances"
         query_params = {
             "ImageComments": "MTF",
             "includefield": "SOPInstanceUID,InstanceNumber,ImageComments,PatientName,StudyDescription"
         }
         
-        # 2. Llamar a la lógica de consulta interna
         all_instances = await _internal_qido_query(query_level, query_params, dicom_ctx)
 
-        # 3. Filtrar los resultados localmente
         mtf_instances = [
             instance for instance in all_instances
             if instance.get("ImageComments") == "MTF"
         ]
         
         if not mtf_instances:
-            await ctx.info("No se encontraron instancias que cumplan el criterio después de filtrar.")
+            await ctx.info("No instances found matching the criteria after filtering.")
         else:
-            await ctx.info(f"Filtrado completado. Se encontraron {len(mtf_instances)} instancias MTF.")
+            await ctx.info(f"Filtering complete. Found {len(mtf_instances)} MTF instances.")
 
-        # 4. Devolver la respuesta con la estructura correcta
         return FilteredInstanceResultsWrapper(result=[FilteredInstanceResult(**r) for r in mtf_instances])
 
-# ==============================================================================
-    # --- LÓGICA Y HERRAMIENTAS MTF INTEGRADAS Y REFACTORIZADAS ---
-    # ==============================================================================
-
-    # PASO 1: La lógica principal vive en una función auxiliar SIN decorador.
-    # Es una función normal que podemos llamar desde cualquier otra.
     async def _calculate_mtf_for_instances(
         study_instance_uid: str,
         series_instance_uid: str,
         sop_instance_uids: List[str],
         ctx: Context
     ) -> MtfSeriesAnalysisResponse:
-        """
-        Función auxiliar interna que descarga y procesa un lote de instancias.
-        Contiene la lógica principal y reporta el progreso para evitar timeouts.
+        """Internal helper function that downloads and processes a batch of instances for MTF analysis.
+
+        This function contains the main logic and reports progress to avoid timeouts.
+
+        Args:
+            study_instance_uid: The Study Instance UID.
+            series_instance_uid: The Series Instance UID.
+            sop_instance_uids: A list of SOP Instance UIDs to process.
+            ctx: The context object provided by FastMCP.
+
+        Returns:
+            An MtfSeriesAnalysisResponse with the results of the analysis.
+
+        Raises:
+            ValueError: If the list of SOPInstanceUIDs is empty or no instances could be downloaded.
         """
         dicom_ctx: DicomContext = ctx.request_context.lifespan_context
         total_uids = len(sop_instance_uids)
 
         if total_uids == 0:
-            raise ValueError("La lista de SOPInstanceUIDs para analizar no puede estar vacía.")
+            raise ValueError("The list of SOPInstanceUIDs to analyze cannot be empty.")
 
-        await ctx.info(f"Iniciando análisis de {total_uids} instancias...")
-        await ctx.report_progress(progress=5, total=100, message="Iniciando descarga de grupo...")
+        await ctx.info(f"Starting analysis of {total_uids} instances...")
+        await ctx.report_progress(progress=5, total=100, message="Starting batch download...")
 
         datasets_to_process = []
         for i, sop_uid in enumerate(sop_instance_uids):
-            # Limpiamos el UID por si acaso
             cleaned_sop_uid = sop_uid.strip()
             if not cleaned_sop_uid:
-                await ctx.warning(f"Se encontró un SOPInstanceUID vacío, será ignorado.")
+                await ctx.warning(f"Found an empty SOPInstanceUID, it will be ignored.")
                 continue
 
-            # Reportamos el progreso ANTES de cada descarga. ¡Esto es lo más importante!
             progress_percent = 10 + (i / total_uids) * 85
             await ctx.report_progress(
                 progress=progress_percent,
                 total=100,
-                message=f"Descargando instancia {i + 1}/{total_uids}"
+                message=f"Downloading instance {i + 1}/{total_uids}"
             )
             
             try:
@@ -788,21 +823,20 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 )
                 datasets_to_process.append(ds)
             except Exception as e:
-                await ctx.warning(f"No se pudo descargar o procesar la instancia {cleaned_sop_uid}: {e}")
+                await ctx.warning(f"Could not download or process instance {cleaned_sop_uid}: {e}")
                 continue
         
         if not datasets_to_process:
-            raise ValueError("No se pudo descargar ninguna de las instancias solicitadas.")
+            raise ValueError("Could not download any of the requested instances.")
 
-        await ctx.info(f"Descarga completa de {len(datasets_to_process)} instancias. Procesando...")
-        await ctx.report_progress(progress=95, total=100, message="Procesando imágenes...")
+        await ctx.info(f"Download complete for {len(datasets_to_process)} instances. Processing...")
+        await ctx.report_progress(progress=95, total=100, message="Processing images...")
 
         results = process_mtf_from_datasets(datasets_to_process)
 
-        await ctx.report_progress(progress=100, total=100, message="Análisis completado.")
+        await ctx.report_progress(progress=100, total=100, message="Analysis complete.")
         return MtfSeriesAnalysisResponse(**results)
 
-    # PASO 2: La herramienta para una lista de instancias ahora es un simple "wrapper".
     @mcp.tool
     async def calculate_mtf_from_instances(
         study_instance_uid: str,
@@ -810,8 +844,16 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         sop_instance_uids: List[str],
         ctx: Context
     ) -> MtfSeriesAnalysisResponse:
-        """
-        Calcula la MTF promediada para una lista explícita de instancias DICOM.
+        """Calculates the averaged MTF for an explicit list of DICOM instances.
+
+        Args:
+            study_instance_uid: The Study Instance UID.
+            series_instance_uid: The Series Instance UID.
+            sop_instance_uids: A list of SOP Instance UIDs to analyze.
+            ctx: The context object provided by FastMCP.
+
+        Returns:
+            An MtfSeriesAnalysisResponse with the results of the analysis.
         """
         return await _calculate_mtf_for_instances(
             study_instance_uid=study_instance_uid,
@@ -820,27 +862,29 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             ctx=ctx
         )
 
-    # PASO 3: La nueva herramienta de alto nivel que lo hace todo.
-# En src/dicom_mcp/server.py
-
     @mcp.tool
     async def analyze_mtf_for_series(
         study_instance_uid: str,
         series_instance_uid: str,
         ctx: Context
     ) -> MtfSeriesAnalysisResponse:
-        """
-        Herramienta de alto nivel que encuentra las instancias MTF de una serie
-        y calcula su MTF promediada en un solo paso.
+        """High-level tool that finds MTF instances in a series and calculates their averaged MTF in one step.
+
+        Args:
+            study_instance_uid: The Study Instance UID.
+            series_instance_uid: The Series Instance UID.
+            ctx: The context object provided by FastMCP.
+
+        Returns:
+            An MtfSeriesAnalysisResponse with the results of the analysis or an error status.
         """
         dicom_ctx = ctx.request_context.lifespan_context
-        # Limpiamos los UIDs al principio para que estén disponibles en todo el ámbito de la función
         clean_study_uid = study_instance_uid.strip()
         clean_series_uid = series_instance_uid.strip()
 
         try:
-            await ctx.info(f"Buscando instancias MTF en la serie {clean_series_uid}...")
-            await ctx.report_progress(progress=5, total=100, message="Buscando instancias...")
+            await ctx.info(f"Searching for MTF instances in series {clean_series_uid}...")
+            await ctx.report_progress(progress=5, total=100, message="Searching for instances...")
 
             qido_level = f"studies/{clean_study_uid}/series/{clean_series_uid}/instances"
             query_params = {"ImageComments": "MTF", "includefield": "SOPInstanceUID"}
@@ -853,9 +897,9 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             ]
             
             if not mtf_instances_uids:
-                raise ValueError("No se encontraron instancias con ImageComments='MTF' en la serie especificada.")
+                raise ValueError("No instances with ImageComments='MTF' were found in the specified series.")
 
-            await ctx.info(f"Se encontraron {len(mtf_instances_uids)} instancias. Delegando análisis MTF...")
+            await ctx.info(f"Found {len(mtf_instances_uids)} instances. Delegating MTF analysis...")
             
             return await _calculate_mtf_for_instances(
                 study_instance_uid=clean_study_uid,
@@ -865,19 +909,16 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             )
 
         except Exception as e:
-            # --- CORRECCIÓN FINAL EN EL MANEJO DE ERRORES ---
-            # El mensaje de log ya no depende de variables locales del 'try'.
-            # Usamos las variables limpias que definimos al principio.
-            error_message = f"Fallo en el flujo de análisis MTF para la serie {clean_series_uid}: {e}"
+            error_message = f"Failed in MTF analysis workflow for series {clean_series_uid}: {e}"
             logger.error(error_message, exc_info=True)
-            await ctx.error(f"Fallo en el análisis de la serie: {e}")
+            await ctx.error(f"Failed to analyze series: {e}")
             
             return MtfSeriesAnalysisResponse(
                 status="Error",
                 processed_files_count=0,
                 valid_vertical_rois=0,
                 valid_horizontal_rois=0,
-                error_details=f"Error en el análisis de la serie: {e}", # El error original se mantiene para el cliente
+                error_details=f"Error analyzing series: {e}",
                 combined_poly_coeffs=None,
                 fit_r_squared=None,
                 fit_rmse=None,

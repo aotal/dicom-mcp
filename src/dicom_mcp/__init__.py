@@ -1,7 +1,9 @@
 """
 DICOM Model Context Protocol Server
 
-A Model Context Protocol implementation for interacting with DICOM servers.
+A Model Context Protocol (MCP) implementation for interacting with DICOM servers.
+This package provides a server that can be used to query and retrieve DICOM data
+from PACS and other DICOM nodes.
 """
 
 from .server import create_dicom_mcp_server
