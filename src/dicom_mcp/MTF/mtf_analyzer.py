@@ -405,21 +405,18 @@ class MtfAnalyzer:
     Clase para realizar el análisis MTF completo desde una ROI RAW,
     incluyendo la linealización interna.
     """
-    def __init__(self, calibration_df, rqa_factors_dict, # Nuevos argumentos requeridos
-                 sub_pixel_factor=0.1,
+    def __init__(self, sub_pixel_factor=0.1,
                  smoothing_window_bins=17,
                  smoothing_polyorder=4,
                  baseline_tail_threshold_mm=7.0,
                  window_width_mm=20.0,
                  cutoff_freq=3.7):
         """
-        Inicializa con los parámetros del análisis y los datos de calibración.
+        Inicializa con los parámetros del análisis.
+        Los datos de calibración ya no son necesarios aquí, ya que la linealización
+        se realiza antes de llamar a esta clase.
 
         Args:
-            calibration_df (pd.DataFrame): DataFrame con los datos de calibración
-                                           (columnas 'VMP', 'K_uGy').
-            rqa_factors_dict (dict): Diccionario mapeando RQA types ('RQA5', etc.)
-                                     a sus factores (SNR_in^2 / 1000).
             sub_pixel_factor (float): Factor de submuestreo para ESF.
             smoothing_window_bins (int): Ventana para suavizado Savitzky-Golay ESF.
             smoothing_polyorder (int): Orden polinomio para suavizado ESF.
@@ -427,20 +424,6 @@ class MtfAnalyzer:
             window_width_mm (float): Ancho ventana Hanning para LSF.
             cutoff_freq (float): Frecuencia de corte para MTF.
         """
-        # --- Validar y almacenar datos de calibración ---
-        if not isinstance(calibration_df, pd.DataFrame):
-            raise TypeError("calibration_df debe ser un pandas DataFrame.")
-        if not all(col in calibration_df.columns for col in ['VMP', 'K_uGy']):
-             raise ValueError("calibration_df debe contener las columnas 'VMP' y 'K_uGy'.")
-        if not isinstance(rqa_factors_dict, dict):
-             raise TypeError("rqa_factors_dict debe ser un diccionario.")
-        if not rqa_factors_dict: # Comprobar si está vacío
-             raise ValueError("rqa_factors_dict no puede estar vacío.")
-
-        self.calibration_df = calibration_df
-        self.rqa_factors_dict = rqa_factors_dict
-        # ----------------------------------------------
-
         # Almacenar otros parámetros de análisis MTF
         self.params = {
             'sub_pixel_factor': sub_pixel_factor,
@@ -458,100 +441,61 @@ class MtfAnalyzer:
         self.window_width_mm = window_width_mm
         self.cutoff_freq = cutoff_freq
 
-        print(f"DEBUG: MtfAnalyzer inicializado. Calibración cargada ({len(self.calibration_df)} puntos), {len(self.rqa_factors_dict)} factores RQA.")
+        print(f"DEBUG: MtfAnalyzer inicializado con parámetros de análisis.")
 
 
-    def analyze_roi(self, roi_array_raw, pixel_spacing, rqa_type, # roi_array_raw y rqa_type son nuevos/modificados
+    def analyze_roi(self, linearized_roi_array: np.ndarray, pixel_spacing: float,
                     roi_id="ROI", verbose=True, plot_angle_fit=False):
         """
-        Realiza el análisis ESF/LSF/MTF completo para una única ROI RAW.
-        Incluye la linealización como primer paso.
+        Realiza el análisis ESF/LSF/MTF completo para una única ROI YA LINEALIZADA.
 
         Args:
-            roi_array_raw (np.ndarray): El array NumPy de la ROI extraída
-                                        *antes* de la linealización (float32).
+            linearized_roi_array (np.ndarray): El array NumPy de la ROI, ya linealizada.
             pixel_spacing (float): Tamaño del píxel en mm.
-            rqa_type (str): El tipo de RQA ('RQA5', 'RQA9', etc.) correspondiente
-                            a esta ROI/imagen DICOM.
             roi_id (str): Identificador para logging y gráficos.
             verbose (bool): Si imprimir mensajes detallados.
             plot_angle_fit (bool): Si graficar el ajuste del ángulo.
 
-
         Returns:
             dict: Un diccionario con los resultados del análisis.
         """
-        print(f"\n=== Analizando {roi_id} (RQA: {rqa_type}) ===")
-        if roi_array_raw is None or roi_array_raw.size == 0:
-            print(f"Error: Array RAW para {roi_id} está vacío.")
-            return {"status": "Error - ROI RAW vacía", "roi_id": roi_id, "rqa_type": rqa_type}
+        print(f"\n=== Analizando {roi_id} ===")
+        if linearized_roi_array is None or linearized_roi_array.size == 0:
+            print(f"Error: Array para {roi_id} está vacío.")
+            return {"status": "Error - ROI de entrada vacía", "roi_id": roi_id}
 
-        if pixel_spacing is None or pixel_spacing <=0:
+        if pixel_spacing is None or pixel_spacing <= 0:
             print(f"Error: Pixel spacing inválido ({pixel_spacing}) para {roi_id}.")
-            return {"status": "Error - Pixel Spacing inválido", "roi_id": roi_id, "rqa_type": rqa_type}
+            return {"status": "Error - Pixel Spacing inválido", "roi_id": roi_id}
 
-        if rqa_type not in self.rqa_factors_dict:
-             print(f"Error: rqa_type '{rqa_type}' no encontrado en los factores RQA del analizador.")
-             return {"status": f"Error - RQA Type '{rqa_type}' desconocido", "roi_id": roi_id, "rqa_type": rqa_type}
+        original_shape = linearized_roi_array.shape
+        print(f" {roi_id} - Forma de entrada: {original_shape}")
 
-        original_shape = roi_array_raw.shape
-        print(f" {roi_id} - Forma RAW inicial: {original_shape}")
-
-        # --- 1. Linealización ---
-        if verbose: print("  [Paso 1] Linealizando ROI RAW...")
-        try:
-            linearized_roi = linearize_preprocessed_image_from_df(
-                preprocessed_image=roi_array_raw, # La ROI raw de entrada
-                calibration_df=self.calibration_df, # Datos del constructor
-                rqa_type=rqa_type, # El rqa_type específico para esta ROI
-                rqa_factors_dict=self.rqa_factors_dict # Factores del constructor
-            )
-            if linearized_roi is None:
-                 # La función linearize ya debería loggear el error específico
-                 raise RuntimeError(f"La función de linealización devolvió None para {roi_id}.")
-            if verbose: print(f"  ROI Linealizada OK. Rango: [{np.min(linearized_roi):.3e}, {np.max(linearized_roi):.3e}]")
-
-        except (ImportError, RuntimeError, ValueError, TypeError, Exception) as e_lin:
-            print(f"Error durante la linealización de {roi_id}: {e_lin}")
-            # Devolver un diccionario de error claro
-            return {
-                "status": "Error - Linealización fallida",
-                "error_details": str(e_lin),
-                "roi_id": roi_id,
-                "rqa_type": rqa_type,
-                "original_shape": original_shape,
-                "pixel_spacing": pixel_spacing,
-            }
-        # -------------------------
-
-        # --- 2. Orientar ROI (Linealizada) ---
-        # Ahora trabajamos con 'linearized_roi'
-        oriented_roi = linearized_roi # Ya debería ser float64 desde la linealización
-        rows_orig, cols_orig = oriented_roi.shape # Usar forma de la linealizada
+        # --- 1. Orientar ROI (ya está linealizada) ---
+        oriented_roi = linearized_roi_array
+        rows_orig, cols_orig = oriented_roi.shape
         rotated_flag = False
         if rows_orig > cols_orig:
-            if verbose: print(f"  [Paso 2] {roi_id} - Rotando 90 grados (ROI linealizada)...")
+            if verbose: print(f"  [Paso 1] {roi_id} - Rotando 90 grados...")
             oriented_roi = np.rot90(oriented_roi)
             rotated_flag = True
             if verbose: print(f"     Forma orientada: {oriented_roi.shape}")
         else:
-             if verbose: print(f"  [Paso 2] {roi_id} - No requiere rotación.")
+            if verbose: print(f"  [Paso 1] {roi_id} - No requiere rotación.")
 
-        # --- 3. Estimar Ángulo ---
-        if verbose: print(f"  [Paso 3] Estimando ángulo (ROI orientada)...")
-        angle_deg = estimate_angle_from_midpoints_vectorized( # O la versión no vectorizada si prefieres
+        # --- 2. Estimar Ángulo ---
+        if verbose: print(f"  [Paso 2] Estimando ángulo (ROI orientada)...")
+        angle_deg = estimate_angle_from_midpoints_vectorized(
             oriented_roi, plot_fit=plot_angle_fit, verbose=verbose
         )
         if angle_deg is None:
             print(f"Error: Falló estimación de ángulo para {roi_id}.")
-            # Devolver más contexto en caso de error
-            return {"status": f"Error - Estimación Ángulo", "roi_id": roi_id, "rqa_type": rqa_type, "oriented_shape": oriented_roi.shape, "pixel_spacing": pixel_spacing}
+            return {"status": "Error - Estimación Ángulo", "roi_id": roi_id, "oriented_shape": oriented_roi.shape, "pixel_spacing": pixel_spacing}
 
-
-        # --- 4. Calcular ESF ---
-        if verbose: print(f"  [Paso 4] Calculando ESF...")
+        # --- 3. Calcular ESF ---
+        if verbose: print(f"  [Paso 3] Calculando ESF...")
         s_esf, esf_smooth, esf_r, delta_s = calculate_esf_from_roi(
-            oriented_roi_array=oriented_roi, # Usar la ROI orientada y linealizada
+            oriented_roi_array=oriented_roi,
             angle_deg=angle_deg,
             pixel_size_mm=pixel_spacing,
             sub_pixel_factor=self.params['sub_pixel_factor'],
@@ -560,11 +504,11 @@ class MtfAnalyzer:
             verbose=verbose
         )
         if esf_smooth is None:
-             print(f"Error: Falló cálculo ESF para {roi_id}.")
-             return {"status": f"Error - Cálculo ESF", "roi_id": roi_id, "rqa_type": rqa_type, "angle_deg": angle_deg}
+            print(f"Error: Falló cálculo ESF para {roi_id}.")
+            return {"status": "Error - Cálculo ESF", "roi_id": roi_id, "angle_deg": angle_deg}
 
-        # --- 5. Calcular LSF ---
-        if verbose: print(f"  [Paso 5] Calculando LSF...")
+        # --- 4. Calcular LSF ---
+        if verbose: print(f"  [Paso 4] Calculando LSF...")
         s_lsf, lsf_final = calculate_lsf(
             s_coords=s_esf,
             esf_smoothed=esf_smooth,
@@ -574,43 +518,37 @@ class MtfAnalyzer:
             verbose=verbose
         )
         if lsf_final is None:
-             print(f"Error: Falló cálculo LSF para {roi_id}.")
-             # Devolver más datos intermedios si falla aquí
-             return {"status": f"Error - Cálculo LSF", "roi_id": roi_id, "rqa_type": rqa_type, "angle_deg": angle_deg, "s_esf":s_esf, "esf_smooth":esf_smooth, "esf_r":esf_r}
+            print(f"Error: Falló cálculo LSF para {roi_id}.")
+            return {"status": "Error - Cálculo LSF", "roi_id": roi_id, "angle_deg": angle_deg, "s_esf": s_esf, "esf_smooth": esf_smooth, "esf_r": esf_r}
 
-        # --- 6. Calcular MTF ---
-        if verbose: print(f"  [Paso 6] Calculando MTF...")
+        # --- 5. Calcular MTF ---
+        if verbose: print(f"  [Paso 5] Calculando MTF...")
         actual_delta_s_lsf = s_lsf[1] - s_lsf[0] if len(s_lsf) > 1 else delta_s
-        # (advertencias sobre delta_s igual que antes)
-        # ...
-
+        
         frequencies, mtf = None, None
-        if actual_delta_s_lsf is not None and len(s_lsf)>1: # Añadir chequeo len(s_lsf)
+        if actual_delta_s_lsf is not None and len(s_lsf) > 1:
             frequencies, mtf = calculate_mtf(
                 s_lsf=s_lsf,
                 lsf_final=lsf_final,
-                delta_s=actual_delta_s_lsf, # Usar el delta_s real de LSF
+                delta_s=actual_delta_s_lsf,
                 verbose=verbose,
                 cutoff_freq=self.params['cutoff_freq']
             )
         elif verbose:
-             print(f"  Advertencia: Omitiendo cálculo MTF debido a LSF insuficiente (puntos={len(s_lsf)}) o delta_s inválido.")
-
+            print(f"  Advertencia: Omitiendo cálculo MTF debido a LSF insuficiente (puntos={len(s_lsf)}) o delta_s inválido.")
 
         if mtf is None:
-             print(f"Advertencia: Falló cálculo MTF para {roi_id} (o LSF insuficiente).")
-             # Devolver éxito parcial si LSF se calculó pero MTF no
-             final_status = "Warning - MTF Failed"
+            print(f"Advertencia: Falló cálculo MTF para {roi_id} (o LSF insuficiente).")
+            final_status = "Warning - MTF Failed"
         else:
-             final_status = "OK"
+            final_status = "OK"
 
         print(f"=== Análisis {roi_id} Completado ({final_status}) ===")
-        # Devolver todos los resultados, incluyendo los intermedios
         return {
             "status": final_status,
-            "roi_id": roi_id, "rqa_type": rqa_type,
+            "roi_id": roi_id,
             "original_shape": original_shape, "pixel_spacing": pixel_spacing,
-            "linearized_roi_stats": {"min": np.min(linearized_roi), "max": np.max(linearized_roi), "mean": np.mean(linearized_roi)}, # Stats de la ROI linealizada
+            "linearized_roi_stats": {"min": np.min(linearized_roi_array), "max": np.max(linearized_roi_array), "mean": np.mean(linearized_roi_array)},
             "rotated_flag": rotated_flag, "oriented_shape": oriented_roi.shape,
             "angle_deg": angle_deg,
             "s_esf": s_esf, "esf_smooth": esf_smooth, "esf_r": esf_r, "delta_s": delta_s,

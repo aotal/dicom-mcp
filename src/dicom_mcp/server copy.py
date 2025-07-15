@@ -741,12 +741,6 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         # 4. Devolver la respuesta con la estructura correcta
         return FilteredInstanceResultsWrapper(result=[FilteredInstanceResult(**r) for r in mtf_instances])
 
-# ==============================================================================
-    # --- LÓGICA Y HERRAMIENTAS MTF INTEGRADAS Y REFACTORIZADAS ---
-    # ==============================================================================
-
-    # PASO 1: La lógica principal vive en una función auxiliar SIN decorador.
-    # Es una función normal que podemos llamar desde cualquier otra.
     async def _calculate_mtf_for_instances(
         study_instance_uid: str,
         series_instance_uid: str,
@@ -755,7 +749,7 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
     ) -> MtfSeriesAnalysisResponse:
         """
         Función auxiliar interna que descarga y procesa un lote de instancias.
-        Contiene la lógica principal y reporta el progreso para evitar timeouts.
+        Esta función contiene la lógica principal y reporta el progreso para evitar timeouts.
         """
         dicom_ctx: DicomContext = ctx.request_context.lifespan_context
         total_uids = len(sop_instance_uids)
@@ -763,46 +757,51 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         if total_uids == 0:
             raise ValueError("La lista de SOPInstanceUIDs para analizar no puede estar vacía.")
 
+        # Notificamos al cliente que empezamos
         await ctx.info(f"Iniciando análisis de {total_uids} instancias...")
         await ctx.report_progress(progress=5, total=100, message="Iniciando descarga de grupo...")
 
         datasets_to_process = []
         for i, sop_uid in enumerate(sop_instance_uids):
-            # Limpiamos el UID por si acaso
+            # 1. LIMPIAR ENTRADA (Buena práctica para evitar errores de URL)
             cleaned_sop_uid = sop_uid.strip()
             if not cleaned_sop_uid:
-                await ctx.warning(f"Se encontró un SOPInstanceUID vacío, será ignorado.")
+                await ctx.warning(f"Se encontró un SOPInstanceUID vacío en la lista en la posición {i}, será ignorado.")
                 continue
 
-            # Reportamos el progreso ANTES de cada descarga. ¡Esto es lo más importante!
+            # 2. REPORTAR PROGRESO (¡La clave para evitar el timeout!)
+            # Se envía una notificación al cliente en CADA iteración del bucle.
             progress_percent = 10 + (i / total_uids) * 85
             await ctx.report_progress(
                 progress=progress_percent,
                 total=100,
                 message=f"Descargando instancia {i + 1}/{total_uids}"
             )
-            
+
             try:
+                # 3. Descargar la instancia
                 ds = await _fetch_dicom_dataset_from_dicomweb(
                     study_instance_uid.strip(), series_instance_uid.strip(), cleaned_sop_uid, dicom_ctx
                 )
                 datasets_to_process.append(ds)
             except Exception as e:
                 await ctx.warning(f"No se pudo descargar o procesar la instancia {cleaned_sop_uid}: {e}")
+                # Continuamos con las demás instancias en lugar de detener todo el proceso
                 continue
         
         if not datasets_to_process:
             raise ValueError("No se pudo descargar ninguna de las instancias solicitadas.")
 
+        # Notificamos que la fase larga ha terminado
         await ctx.info(f"Descarga completa de {len(datasets_to_process)} instancias. Procesando...")
         await ctx.report_progress(progress=95, total=100, message="Procesando imágenes...")
 
+        # Procesar el lote completo de datasets descargados
         results = process_mtf_from_datasets(datasets_to_process)
 
         await ctx.report_progress(progress=100, total=100, message="Análisis completado.")
         return MtfSeriesAnalysisResponse(**results)
 
-    # PASO 2: La herramienta para una lista de instancias ahora es un simple "wrapper".
     @mcp.tool
     async def calculate_mtf_from_instances(
         study_instance_uid: str,
@@ -813,76 +812,14 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         """
         Calcula la MTF promediada para una lista explícita de instancias DICOM.
         """
+        # Simplemente llama a la lógica interna y devuelve el resultado.
         return await _calculate_mtf_for_instances(
             study_instance_uid=study_instance_uid,
             series_instance_uid=series_instance_uid,
             sop_instance_uids=sop_instance_uids,
             ctx=ctx
         )
-
-    # PASO 3: La nueva herramienta de alto nivel que lo hace todo.
-# En src/dicom_mcp/server.py
-
-    @mcp.tool
-    async def analyze_mtf_for_series(
-        study_instance_uid: str,
-        series_instance_uid: str,
-        ctx: Context
-    ) -> MtfSeriesAnalysisResponse:
-        """
-        Herramienta de alto nivel que encuentra las instancias MTF de una serie
-        y calcula su MTF promediada en un solo paso.
-        """
-        dicom_ctx = ctx.request_context.lifespan_context
-        # Limpiamos los UIDs al principio para que estén disponibles en todo el ámbito de la función
-        clean_study_uid = study_instance_uid.strip()
-        clean_series_uid = series_instance_uid.strip()
-
-        try:
-            await ctx.info(f"Buscando instancias MTF en la serie {clean_series_uid}...")
-            await ctx.report_progress(progress=5, total=100, message="Buscando instancias...")
-
-            qido_level = f"studies/{clean_study_uid}/series/{clean_series_uid}/instances"
-            query_params = {"ImageComments": "MTF", "includefield": "SOPInstanceUID"}
             
-            all_instances = await _internal_qido_query(qido_level, query_params, dicom_ctx)
-            
-            mtf_instances_uids = [
-                instance.get('SOPInstanceUID') for instance in all_instances
-                if instance.get("ImageComments") == "MTF" and instance.get('SOPInstanceUID')
-            ]
-            
-            if not mtf_instances_uids:
-                raise ValueError("No se encontraron instancias con ImageComments='MTF' en la serie especificada.")
-
-            await ctx.info(f"Se encontraron {len(mtf_instances_uids)} instancias. Delegando análisis MTF...")
-            
-            return await _calculate_mtf_for_instances(
-                study_instance_uid=clean_study_uid,
-                series_instance_uid=clean_series_uid,
-                sop_instance_uids=mtf_instances_uids,
-                ctx=ctx
-            )
-
-        except Exception as e:
-            # --- CORRECCIÓN FINAL EN EL MANEJO DE ERRORES ---
-            # El mensaje de log ya no depende de variables locales del 'try'.
-            # Usamos las variables limpias que definimos al principio.
-            error_message = f"Fallo en el flujo de análisis MTF para la serie {clean_series_uid}: {e}"
-            logger.error(error_message, exc_info=True)
-            await ctx.error(f"Fallo en el análisis de la serie: {e}")
-            
-            return MtfSeriesAnalysisResponse(
-                status="Error",
-                processed_files_count=0,
-                valid_vertical_rois=0,
-                valid_horizontal_rois=0,
-                error_details=f"Error en el análisis de la serie: {e}", # El error original se mantiene para el cliente
-                combined_poly_coeffs=None,
-                fit_r_squared=None,
-                fit_rmse=None,
-                mtf_at_50_percent=None
-            )  
     return mcp
 
     

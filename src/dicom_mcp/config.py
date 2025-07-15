@@ -23,6 +23,7 @@ class DicomConfiguration(BaseModel):
     calling_aet: str
     local_storage_dir: str = "./dicom_received"
     dicomweb_url: str
+    dicomweb_timeout: float = 30.0  # Timeout en segundos para peticiones DICOMweb
 
 def load_config(config_path: str) -> DicomConfiguration:
     """Load DICOM configuration from YAML file.

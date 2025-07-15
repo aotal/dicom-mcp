@@ -15,56 +15,46 @@ except ImportError:
 
 class RoiExtractor:
     """
-    Clase para cargar una imagen DICOM, encontrar un objeto central
+    Clase para encontrar un objeto central en un array de píxeles
     y extraer ROIs específicas para análisis MTF.
+    Opera sobre un array de píxeles ya cargado y linealizado.
     """
-    def __init__(self, dicom_filepath, verbose=True):
-        self.dicom_filepath = dicom_filepath
+    def __init__(self, pixel_array: np.ndarray, pixel_spacing_mm: float, verbose=True):
+        self.pixel_array = pixel_array
+        self.pixel_spacing_mm = pixel_spacing_mm
         self.verbose = verbose
-        self.ds = None
-        self.image_16bit = None
-        self.pixel_spacing_mm = None
+        
         self.binary_image = None
         self.ref_contour = None
         self.ref_centroid = None
         self.ref_angle = None
-        self.img_shape_yx = None
+        self.img_shape_yx = self.pixel_array.shape
 
-        if not os.path.exists(dicom_filepath):
-            raise FileNotFoundError(f"Archivo DICOM no encontrado: {dicom_filepath}")
+        if self.pixel_array is None or self.pixel_array.size == 0:
+            raise ValueError("El array de píxeles de entrada no puede estar vacío.")
+        
+        self._analyze_geometry()
 
-        self._load_and_process_dicom()
-
-    def _load_and_process_dicom(self):
-        """Carga interna, binarización y análisis de contorno."""
-        # --- Leer DICOM y Pixel Spacing (adaptado de binarize_dicom) ---
+    def _analyze_geometry(self):
+        """Binarización y análisis de contorno para encontrar el centroide del objeto."""
+        # --- Binarizar ---
+        # Otsu funciona mejor con enteros. Normalizamos el array de flotantes a un rango de 16 bits
+        # para replicar el comportamiento original que operaba sobre `image_16bit`.
         try:
-            self.ds = pydicom.dcmread(self.dicom_filepath)
-            self.image_16bit = self.ds.pixel_array.astype(np.int16) # Usar int16 o uint16 según sea necesario
-            self.img_shape_yx = self.image_16bit.shape
-            if self.image_16bit is None or self.image_16bit.size == 0:
-                raise ValueError("No se encontraron datos de píxeles.")
-            if self.verbose: print(f"DICOM '{os.path.basename(self.dicom_filepath)}' leído ({self.img_shape_yx}, {self.image_16bit.dtype}).")
+            pa_min, pa_max = np.min(self.pixel_array), np.max(self.pixel_array)
+            if pa_max > pa_min:
+                image_for_otsu = ((self.pixel_array - pa_min) / (pa_max - pa_min) * 65535).astype(np.uint16)
+            else:
+                image_for_otsu = self.pixel_array.astype(np.uint16) # Array plano
 
-            spacing = self.ds.get("PixelSpacing", self.ds.get("ImagerPixelSpacing", [1.0, 1.0]))
-            self.pixel_spacing_mm = float(spacing[0])
-            if len(spacing) > 1 and abs(float(spacing[0]) - float(spacing[1])) > 1e-6:
-                if self.verbose: print(f"Advertencia: Píxeles anisotrópicos ({spacing}). Usando primer valor ({self.pixel_spacing_mm:.4f} mm).")
-            if self.verbose: print(f"Tamaño de Píxel: {self.pixel_spacing_mm:.4f} mm/píxel")
-
-        except Exception as e:
-            raise RuntimeError(f"Error al leer DICOM o pixel spacing: {e}")
-
-        # --- Binarizar (adaptado de binarize_dicom) ---
-        try:
-            threshold_value = threshold_otsu(self.image_16bit)
-            if self.verbose: print(f"Umbral Otsu: {threshold_value}")
+            threshold_value = threshold_otsu(image_for_otsu)
+            if self.verbose: print(f"Umbral Otsu (sobre array normalizado): {threshold_value}")
             # Objeto=0 (negro), Fondo=255 (blanco)
-            self.binary_image = (self.image_16bit >= threshold_value).astype(np.uint8) * 255
+            self.binary_image = (image_for_otsu >= threshold_value).astype(np.uint8) * 255
         except Exception as e:
             raise RuntimeError(f"Error calculando umbral Otsu o binarizando: {e}")
 
-        # --- Analizar Imagen Binaria (adaptado de analyze_binary_image) ---
+        # --- Analizar Imagen Binaria ---
         try:
             # Asumiendo objeto = 0 (negro)
             img_inv = cv2.bitwise_not(self.binary_image)
@@ -79,7 +69,7 @@ class RoiExtractor:
             cy = M["m01"] / M["m00"]
             self.ref_centroid = (cx, cy)
 
-            # Calcular ángulo (opcional, podría no ser necesario para extracción por offset)
+            # Calcular ángulo
             mu20 = M['mu20'] / M['m00']; mu02 = M['mu02'] / M['m00']; mu11 = M['mu11'] / M['m00']
             self.ref_angle = math.degrees(0.5 * np.arctan2(2 * mu11, mu20 - mu02))
             if self.verbose: print(f"Objeto encontrado: Centroide=({cx:.1f}, {cy:.1f}), Ángulo={self.ref_angle:.1f}°")
@@ -98,10 +88,10 @@ class RoiExtractor:
             roi2_shape_yx (tuple): Forma (alto, ancho) en píxeles para ROI 2.
 
         Returns:
-            list: [roi1_array, roi2_array] como arrays float32, o None si falla.
+            list: [roi1_array, roi2_array] como arrays float64, o None si falla.
         """
-        if self.ref_centroid is None or self.pixel_spacing_mm is None or self.image_16bit is None:
-            print("Error: El objeto DICOM no se procesó correctamente antes de extraer ROIs.")
+        if self.ref_centroid is None or self.pixel_spacing_mm is None or self.pixel_array is None:
+            print("Error: El objeto no se procesó correctamente antes de extraer ROIs.")
             return None
 
         rois_extracted = []
@@ -128,8 +118,8 @@ class RoiExtractor:
             y_start = max(0, int(round(roi_center_y - roi_h / 2)))
             y_end = min(img_h, int(round(roi_center_y + roi_h / 2)))
 
-            # Extraer ROI (asegurarse de que sea float32)
-            cropped_roi = self.image_16bit[y_start:y_end, x_start:x_end].astype(np.float32)
+            # Extraer ROI del array de píxeles ya linealizado (float64)
+            cropped_roi = self.pixel_array[y_start:y_end, x_start:x_end]
 
             if self.verbose:
                 print(f"ROI {roi_id}: Centro=({roi_center_x:.1f}, {roi_center_y:.1f})px <- Offset={params['offset']}mm")
@@ -137,14 +127,9 @@ class RoiExtractor:
 
             if cropped_roi.size == 0:
                 print(f"Advertencia: ROI {roi_id} extraída está vacía!")
-                # Podrías decidir devolver None o un array vacío
-                # return None # Abortar si una ROI falla? O continuar?
-                rois_extracted.append(np.array([], dtype=np.float32)) # Añadir array vacío
+                rois_extracted.append(np.array([], dtype=np.float64)) # Añadir array vacío
             else:
                  rois_extracted.append(cropped_roi)
-
-        # Visualización opcional (adaptada de extraer_rois_mtf)
-        # ... (se podría añadir un método show_rois() si se desea) ...
 
         return rois_extracted
 
@@ -159,24 +144,6 @@ class RoiExtractor:
 
 # --- Ejemplo de uso (opcional, mover a otro script) ---
 if __name__ == "__main__":
-     INPUT_DICOM_FILE = "src/MTF/Img6__SN2024H1__KVP=70__mAs=13.0__IE=729.dcm"
-     ROI1_OFFSET_MM = (13, 0); ROI1_SHAPE_YX = (100, 200) # Alto, Ancho
-     ROI2_OFFSET_MM = (0, -14); ROI2_SHAPE_YX = (200, 100) # Alto, Ancho
-
-     try:
-         extractor = RoiExtractor(INPUT_DICOM_FILE)
-         print(f"Pixel spacing from extractor: {extractor.pixel_spacing}")
-         print(f"Centroid from extractor: {extractor.centroid}")
-
-         rois = extractor.extract_mtf_rois(ROI1_OFFSET_MM, ROI1_SHAPE_YX,
-                                           ROI2_OFFSET_MM, ROI2_SHAPE_YX)
-
-         if rois and rois[0].size > 0 and rois[1].size > 0:
-             print("Ambas ROIs extraídas con éxito.")
-             # np.save("roi1_clase.npy", rois[0])
-             # np.save("roi2_clase.npy", rois[1])
-         else:
-             print("Fallo al extraer una o ambas ROIs.")
-
-     except (FileNotFoundError, RuntimeError, ValueError) as e:
-         print(f"Error procesando DICOM: {e}")
+     # Este ejemplo de uso ya no funcionará directamente porque necesita un pixel_array.
+     # Se deja como referencia de la lógica de llamada.
+     pass

@@ -178,3 +178,49 @@ class ModalityLUTSequenceModel(DicomResponseBase):
 
 class QidoQueryResultsWrapper(BaseModel):
     result: List[QidoResponse]
+
+# --- MTF Analysis Models ---
+
+class MtfResultDetail(BaseModel):
+    """Contiene los resultados detallados de un único análisis MTF (para una ROI)."""
+    status: str
+    roi_id: str
+    pixel_spacing: float
+    angle_deg: Optional[float] = None
+    frequencies: Optional[List[float]] = None
+    mtf: Optional[List[float]] = None
+
+class MtfSingleInstanceResponse(BaseModel):
+    """Respuesta para el análisis MTF de una única instancia DICOM."""
+    status: str
+    sop_instance_uid: str
+    error_details: Optional[str] = None
+    vertical_mtf_result: Optional[MtfResultDetail] = None
+    horizontal_mtf_result: Optional[MtfResultDetail] = None
+
+class MtfSeriesAnalysisResponse(BaseModel):
+    """Respuesta para el análisis MTF agregado de una serie completa."""
+    status: str
+    processed_files_count: int
+    valid_vertical_rois: int
+    valid_horizontal_rois: int
+    error_details: Optional[str] = None
+    combined_poly_coeffs: Optional[List[float]] = None
+    fit_r_squared: Optional[float] = None
+    fit_rmse: Optional[float] = None
+    mtf_at_50_percent: Optional[float] = None
+
+class FilteredInstanceResult(DicomResponseBase):
+    """Modelo para una única instancia DICOM con sus campos más relevantes."""
+    SOPInstanceUID: Optional[str] = None
+    InstanceNumber: Optional[str] = None
+    ImageComments: Optional[str] = None
+    PatientName: Optional[Any] = None # Puede ser un objeto
+    StudyDescription: Optional[str] = None
+    
+    class Config:
+        extra = 'allow' # Permite campos extra que no estén definidos
+
+class FilteredInstanceResultsWrapper(BaseModel):
+    """Wrapper para la lista de resultados de instancias filtradas."""
+    result: List[FilteredInstanceResult]  
