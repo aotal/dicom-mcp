@@ -269,4 +269,26 @@ class NnpsSeriesAnalysisResponse(DicomResponseBase):
     Wrapper para la respuesta completa del análisis NNPS de una serie.
     Contiene una lista con los resultados de cada grupo de Kerma analizado.
     """
-    groups_analyzed: List[NnpsGroupResult] = []        
+    groups_analyzed: List[NnpsGroupResult] = [] 
+
+class ClassifiedInstance(BaseModel):
+    """Represents a single classified instance with its key attributes."""
+    sop_instance_uid: str
+    instance_number: Optional[str] = None
+    image_comments: Optional[str] = None
+    calculated_kerma_uGy: Optional[float] = None
+
+class KermaGroup(BaseModel):
+    """Represents a group of instances with a similar calculated Kerma value."""
+    kerma_group_uGy: float
+    instances: List[ClassifiedInstance] = []
+
+class SeriesClassificationResponse(DicomResponseBase):
+    """
+    Provides a classification of all instances in a series by their ImageComments
+    and, for FDT images, groups them by common Kerma values.
+    """
+    mtf_instances: List[ClassifiedInstance] = []
+    tor_instances: List[ClassifiedInstance] = []
+    fdt_kerma_groups: List[KermaGroup] = []
+    other_instances: List[ClassifiedInstance] = []           

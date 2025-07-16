@@ -4,6 +4,7 @@ DICOM MCP Server main implementation.
 
 import logging
 import pydicom
+import anyio
 import numpy as np
 from pydicom.datadict import keyword_for_tag
 from pathlib import Path
@@ -11,6 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Any, AsyncIterator
 from .models import PixelDataResponse, DicomNodeInfo, DicomNodeListResponse, OperationStatusResponse, ConnectionVerificationResponse, PatientQueryResult, StudyResponse, SeriesResponse, AttributePresetDetails, AttributePresetsResponse, QidoResponse, PatientQueryResultsWrapper, StudyQueryResultsWrapper, SeriesQueryResultsWrapper, QidoQueryResultsWrapper, ModalityLUTSequenceModel, ModalityLUTSequenceItem, MtfSingleInstanceResponse, MtfSeriesAnalysisResponse, FilteredInstanceResultsWrapper, FilteredInstanceResult, NnpsSeriesAnalysisResponse, NnpsGroupResult, NnpsAnalysisResponse
+from .models import SeriesClassificationResponse, KermaGroup, ClassifiedInstance
 import httpx # Import httpx for DICOMweb operations
 from email.message import Message
 from email.parser import BytesParser
@@ -22,7 +24,8 @@ from .dicom_client import DicomClient
 from .config import DicomConfiguration, load_config
 from .MTF.utils import apply_dicom_linearity
 from .mtf_processor_wrapper import process_mtf_from_datasets
-from .nnps_processor_wrapper import process_series_for_nnps, process_nnps_for_group 
+from .nnps_processor_wrapper import process_series_for_nnps, process_nnps_for_group
+from .classification_wrapper import classify_instances
 
 
 
@@ -938,96 +941,99 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
         ctx: Context
     ) -> NnpsAnalysisResponse:
         """
-        Calcula el NNPS para una lista explícita de instancias, tratándolas como un único grupo.
+        Calculates the NNPS for an explicit list of instances, treating them as a single group.
+        Requires at least 2 instances.
         """
         dicom_ctx = ctx.request_context.lifespan_context
-        
         try:
-            await ctx.info(f"Iniciando análisis NNPS para {len(sop_instance_uids)} instancias...")
+            if len(sop_instance_uids) < 2:
+                raise ValueError("At least 2 instances are required for NNPS group analysis.")
+
+            await ctx.info(f"Starting NNPS analysis for {len(sop_instance_uids)} instances...")
             
             datasets_to_process = []
             for i, sop_uid in enumerate(sop_instance_uids):
                 progress = 10 + (i / len(sop_instance_uids)) * 90
-                await ctx.report_progress(progress=progress, total=100, message=f"Descargando instancia {i+1}/{len(sop_instance_uids)}")
+                await ctx.report_progress(progress=progress, total=100, message=f"Downloading instance {i+1}/{len(sop_instance_uids)}")
                 
                 ds = await _fetch_dicom_dataset_from_dicomweb(
                     study_instance_uid.strip(), series_instance_uid.strip(), sop_uid.strip(), dicom_ctx
                 )
                 datasets_to_process.append(ds)
 
-            await ctx.info("Procesando datos para NNPS...")
+            await ctx.info("Processing data for NNPS...")
             
-            results = process_nnps_for_group(datasets=datasets_to_process)
+            results = await anyio.to_thread.run_sync(process_nnps_for_group, datasets_to_process)
             
             return NnpsAnalysisResponse(**results)
 
         except Exception as e:
-            logger.error(f"Fallo en el análisis NNPS: {e}", exc_info=True)
-            await ctx.error(f"Fallo en el análisis NNPS: {e}")
-            return NnpsAnalysisResponse(status="Error", error_details=str(e))
+            logger.error(f"Failed in NNPS analysis: {e}", exc_info=True)
+            await ctx.error(f"Failed in NNPS analysis: {e}")
+            return NnpsAnalysisResponse(status="Error", error_details=str(e))        
+ 
 
-    # --- Herramienta para analizar una serie completa (con agrupación) ---
     @mcp.tool
-    async def analyze_nnps_for_series(
+    async def classify_instances_in_series(
         study_instance_uid: str,
         series_instance_uid: str,
         ctx: Context
-    ) -> NnpsSeriesAnalysisResponse:
+    ) -> SeriesClassificationResponse:
         """
-        Encuentra todas las instancias FDT en una serie, las agrupa por Kerma
-        y calcula el NNPS para cada grupo con 2 o más imágenes.
+        Finds all instances in a series, downloads them, and classifies them by
+        ImageComments. FDT images are further grouped by their calculated Kerma value.
+        This tool is useful for discovering which instances are available for MTF or NNPS analysis.
         """
         dicom_ctx = ctx.request_context.lifespan_context
         clean_study_uid = study_instance_uid.strip()
         clean_series_uid = series_instance_uid.strip()
 
         try:
-            await ctx.info(f"Buscando instancias FDT en la serie {clean_series_uid}...")
-            
-            qido_level = f"studies/{clean_study_uid}/series/{clean_series_uid}/instances"
-            query_params = {"ImageComments": "FDT", "includefield": "SOPInstanceUID"}
-            
-            # --- CORRECCIÓN AQUÍ ---
-            # Se usaba 'query_level' en lugar de 'qido_level'
-            all_instances = await _internal_qido_query(qido_level, query_params, dicom_ctx)
-            
-            fdt_instances_uids = [inst.get('SOPInstanceUID') for inst in all_instances if inst.get("ImageComments") == "FDT" and inst.get('SOPInstanceUID')]
-            
-            if not fdt_instances_uids:
-                raise ValueError("No se encontraron instancias con ImageComments='FDT'.")
+            # 1. Find all relevant instances in the series
+            await ctx.info(f"Searching for all instances in series {clean_series_uid}...")
+            await ctx.report_progress(progress=5, total=100, message="Searching for instances...")
 
-            await ctx.info(f"Se encontraron {len(fdt_instances_uids)} instancias con el comentario 'FDT'. Descargando...")
+            qido_level = f"studies/{clean_study_uid}/series/{clean_series_uid}/instances"
+            query_params = {"includefield": "SOPInstanceUID,InstanceNumber,ImageComments"}
+            
+            all_instances_meta = await _internal_qido_query(qido_level, query_params, dicom_ctx)
+            
+            if not all_instances_meta:
+                raise ValueError("No instances found in the specified series.")
+
+            sop_uids_to_download = [inst.get('SOPInstanceUID') for inst in all_instances_meta if inst.get('SOPInstanceUID')]
+
+            # 2. Download all instances, reporting progress
+            await ctx.info(f"Found {len(sop_uids_to_download)} total instances. Downloading...")
             
             datasets_to_process = []
-            for i, sop_uid in enumerate(fdt_instances_uids):
-                progress = 10 + (i / len(fdt_instances_uids)) * 85
-                await ctx.report_progress(progress=progress, total=100, message=f"Descargando instancia {i+1}/{len(fdt_instances_uids)}")
-                ds = await _fetch_dicom_dataset_from_dicomweb(clean_study_uid, clean_series_uid, sop_uid.strip(), dicom_ctx)
+            for i, sop_uid in enumerate(sop_uids_to_download):
+                progress = 10 + (i / len(sop_uids_to_download)) * 85
+                await ctx.report_progress(progress=progress, total=100, message=f"Downloading instance {i+1}/{len(sop_uids_to_download)}")
+                
+                ds = await _fetch_dicom_dataset_from_dicomweb(
+                    clean_study_uid, clean_series_uid, sop_uid.strip(), dicom_ctx
+                )
                 datasets_to_process.append(ds)
 
-            await ctx.info("Descarga completa. Agrupando por Kerma y analizando...")
+            # 3. Call the wrapper to classify, running it in a separate thread
+            await ctx.info("Download complete. Classifying instances...")
+            await ctx.report_progress(progress=95, total=100, message="Classifying...")
+
+            classification_results = await anyio.to_thread.run_sync(classify_instances, datasets_to_process)
             
-            results = process_series_for_nnps(datasets=datasets_to_process)
-            
-            if results.get("status") != "OK":
-                raise RuntimeError(results.get("error_details", "Error desconocido en el procesador NNPS."))
-
-            analyzed_groups = results.get("groups_analyzed", [])
-
-            if not analyzed_groups:
-                await ctx.info("Análisis completado. No se formaron grupos de 2 o más imágenes con Kerma similar.")
-                return NnpsSeriesAnalysisResponse(
-                    status="OK",
-                    error_details="El análisis se completó, pero no se formaron grupos de imágenes con Kerma similar (se requieren al menos 2 imágenes por grupo). Verifique que la serie contenga múltiples exposiciones idénticas.",
-                    groups_analyzed=[]
-                )
-
-            await ctx.info(f"Análisis completado. Se procesaron {len(analyzed_groups)} grupos de Kerma.")
-            return NnpsSeriesAnalysisResponse(status="OK", groups_analyzed=[NnpsGroupResult(**g) for g in analyzed_groups])
+            return SeriesClassificationResponse(
+                status="OK",
+                mtf_instances=[ClassifiedInstance(**i) for i in classification_results.get("mtf_instances", [])],
+                tor_instances=[ClassifiedInstance(**i) for i in classification_results.get("tor_instances", [])],
+                fdt_kerma_groups=[KermaGroup(**g) for g in classification_results.get("fdt_kerma_groups", [])],
+                other_instances=[ClassifiedInstance(**i) for i in classification_results.get("other_instances", [])]
+            )
 
         except Exception as e:
-            error_message = f"Fallo en el flujo de análisis NNPS para la serie {clean_series_uid}: {e}"
+            error_message = f"Failed during instance classification for series {clean_series_uid}: {e}"
             logger.error(error_message, exc_info=True)
             await ctx.error(error_message)
-            return NnpsSeriesAnalysisResponse(status="Error", error_details=str(e))    
+            return SeriesClassificationResponse(status="Error", error_details=str(e))
+                     
     return mcp
