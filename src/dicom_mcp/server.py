@@ -86,6 +86,8 @@ async def _fetch_dicom_dataset_from_dicomweb(
 
     try:
         async with httpx.AsyncClient() as client:
+            # --- MODIFICACIÓN CLAVE AQUÍ ---
+            # Usamos el timeout desde la configuración en lugar de un valor fijo.
             response = await client.get(
                 dicomweb_url, 
                 headers={"Accept": 'multipart/related; type="application/dicom"'},
@@ -955,8 +957,6 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
 
             await ctx.info("Procesando datos para NNPS...")
             
-            # --- LLAMADA CORREGIDA ---
-            # Llama a la función específica para procesar un grupo.
             results = process_nnps_for_group(datasets=datasets_to_process)
             
             return NnpsAnalysisResponse(**results)
@@ -965,7 +965,8 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             logger.error(f"Fallo en el análisis NNPS: {e}", exc_info=True)
             await ctx.error(f"Fallo en el análisis NNPS: {e}")
             return NnpsAnalysisResponse(status="Error", error_details=str(e))
-        
+
+    # --- Herramienta para analizar una serie completa (con agrupación) ---
     @mcp.tool
     async def analyze_nnps_for_series(
         study_instance_uid: str,
@@ -985,14 +986,17 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             
             qido_level = f"studies/{clean_study_uid}/series/{clean_series_uid}/instances"
             query_params = {"ImageComments": "FDT", "includefield": "SOPInstanceUID"}
-            all_instances = await _internal_qido_query(query_level, query_params, dicom_ctx)
+            
+            # --- CORRECCIÓN AQUÍ ---
+            # Se usaba 'query_level' en lugar de 'qido_level'
+            all_instances = await _internal_qido_query(qido_level, query_params, dicom_ctx)
             
             fdt_instances_uids = [inst.get('SOPInstanceUID') for inst in all_instances if inst.get("ImageComments") == "FDT" and inst.get('SOPInstanceUID')]
             
             if not fdt_instances_uids:
                 raise ValueError("No se encontraron instancias con ImageComments='FDT'.")
 
-            await ctx.info(f"Se encontraron {len(fdt_instances_uids)} instancias. Descargando...")
+            await ctx.info(f"Se encontraron {len(fdt_instances_uids)} instancias con el comentario 'FDT'. Descargando...")
             
             datasets_to_process = []
             for i, sop_uid in enumerate(fdt_instances_uids):
@@ -1001,10 +1005,8 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
                 ds = await _fetch_dicom_dataset_from_dicomweb(clean_study_uid, clean_series_uid, sop_uid.strip(), dicom_ctx)
                 datasets_to_process.append(ds)
 
-            await ctx.info("Procesando datos para NNPS...")
+            await ctx.info("Descarga completa. Agrupando por Kerma y analizando...")
             
-            # --- LLAMADA CORRECTA ---
-            # Llama a la función que realiza la agrupación por Kerma.
             results = process_series_for_nnps(datasets=datasets_to_process)
             
             if results.get("status") != "OK":
@@ -1013,19 +1015,19 @@ def create_dicom_mcp_server(config_path: str, name: str = "DICOM MCP") -> FastMC
             analyzed_groups = results.get("groups_analyzed", [])
 
             if not analyzed_groups:
-                return NnpsSeriesAnalysisResponse(status="OK", error_details="Análisis completado, pero no se formaron grupos con suficientes imágenes (se requieren >= 2 por grupo).", groups_analyzed=[])
+                await ctx.info("Análisis completado. No se formaron grupos de 2 o más imágenes con Kerma similar.")
+                return NnpsSeriesAnalysisResponse(
+                    status="OK",
+                    error_details="El análisis se completó, pero no se formaron grupos de imágenes con Kerma similar (se requieren al menos 2 imágenes por grupo). Verifique que la serie contenga múltiples exposiciones idénticas.",
+                    groups_analyzed=[]
+                )
 
+            await ctx.info(f"Análisis completado. Se procesaron {len(analyzed_groups)} grupos de Kerma.")
             return NnpsSeriesAnalysisResponse(status="OK", groups_analyzed=[NnpsGroupResult(**g) for g in analyzed_groups])
 
         except Exception as e:
             error_message = f"Fallo en el flujo de análisis NNPS para la serie {clean_series_uid}: {e}"
             logger.error(error_message, exc_info=True)
             await ctx.error(error_message)
-            return NnpsSeriesAnalysisResponse(status="Error", error_details=str(e))          
+            return NnpsSeriesAnalysisResponse(status="Error", error_details=str(e))    
     return mcp
-
-    
-
-    
-
-    
