@@ -11,6 +11,11 @@ dependencies = [
     "pynetdicom>=2.1.1",
     "pypdf2>=3.0.1",
     "pyyaml>=6.0.2",
+    "pandas>=2.3.1",
+    "opencv-python>=4.11.0.86",
+    "scikit-image>=0.25.2",
+    "matplotlib>=3.10.3",
+    "pydicom>=3.0.1"
 ]
 
 [project.optional-dependencies]
