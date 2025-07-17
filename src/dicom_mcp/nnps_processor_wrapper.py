@@ -7,25 +7,25 @@ from scipy.stats import binned_statistic
 from typing import List, Dict, Any
 from collections import defaultdict
 
-# --- FUNCIONES AUXILIARES INTERNAS ---
+# --- INTERNAL HELPER FUNCTIONS ---
 
 def _get_pixel_spacing(ds: pydicom.Dataset) -> float:
-    """Obtiene el espaciado de píxeles (en mm) del dataset DICOM de forma robusta."""
+    """Robustly retrieves the pixel spacing (in mm) from the DICOM dataset."""
     for tag in ["PixelSpacing", "ImagerPixelSpacing", "SpatialResolution", "NominalScannedPixelSpacing"]:
         if tag in ds:
             value = ds.get(tag)
             return float(value[0] if isinstance(value, pydicom.multival.MultiValue) else value)
-    raise ValueError("No se pudo encontrar un tag de espaciado de píxeles válido.")
+    raise ValueError("Could not find a valid pixel spacing tag.")
 
 def _apply_rescale(ds: pydicom.Dataset) -> np.ndarray:
-    """Aplica Rescale Slope e Intercept a los datos de píxeles para obtener µGy."""
+    """Applies Rescale Slope and Intercept to pixel data to obtain µGy."""
     pixel_array = ds.pixel_array.astype(np.float64)
     slope = float(ds.get("RescaleSlope", 1.0))
     intercept = float(ds.get("RescaleIntercept", 0.0))
     return pixel_array * slope + intercept
 
 def _calculate_kerma_from_roi(image_in_uGy: np.ndarray, pixel_spacing_mm: float) -> float:
-    """Calcula el Kerma promedio de una ROI central de 4x4 cm."""
+    """Calculates the average Kerma from a central 4x4 cm ROI."""
     roi_size_mm = 40.0
     roi_half_pixels = int(roi_size_mm / (2 * pixel_spacing_mm))
     center_y, center_x = image_in_uGy.shape[0] // 2, image_in_uGy.shape[1] // 2
@@ -33,7 +33,7 @@ def _calculate_kerma_from_roi(image_in_uGy: np.ndarray, pixel_spacing_mm: float)
     return np.mean(roi)
 
 def _calculate_nnps_for_group_logic(group_images: List[np.ndarray], pixel_spacing_mm: float, mean_kerma_uGy: float) -> Dict[str, Any]:
-    """Contiene la lógica matemática para calcular el NNPS de un grupo de imágenes."""
+    """Contains the mathematical logic to calculate the NNPS for a group of images."""
     ref_shape = group_images[0].shape
     nps_2d_sum = np.zeros(ref_shape, dtype=np.float64)
     for img in group_images:
@@ -42,7 +42,7 @@ def _calculate_nnps_for_group_logic(group_images: List[np.ndarray], pixel_spacin
         nps_2d_sum += np.abs(fft_2d)**2
     avg_nps_2d = nps_2d_sum / len(group_images)
     
-    if mean_kerma_uGy < 1e-9: raise ValueError("El Kerma promedio es cercano a cero.")
+    if mean_kerma_uGy < 1e-9: raise ValueError("Average Kerma is close to zero.")
     
     pixel_area = pixel_spacing_mm**2
     num_pixels = ref_shape[0] * ref_shape[1]
@@ -66,14 +66,14 @@ def _calculate_nnps_for_group_logic(group_images: List[np.ndarray], pixel_spacin
 
     return {"nnps_1d_radial_freq": bin_centers.tolist(), "nnps_1d_radial_values": nnps_radial_mean.tolist()}
 
-# --- FUNCIONES DE PROCESADO (Puntos de entrada para las herramientas) ---
+# --- PROCESSING FUNCTIONS (Entry points for tools) ---
 
 def process_nnps_for_group(datasets: List[pydicom.Dataset]) -> Dict[str, Any]:
     """
-    Calcula el NNPS para un único grupo de datasets, asumiendo que tienen un Kerma similar.
+    Calculates the NNPS for a single group of datasets, assuming they have a similar Kerma.
     """
     if not datasets or len(datasets) < 2:
-        return {"status": "Error", "error_details": "Se requieren al menos 2 imágenes para el análisis de grupo."}
+        return {"status": "Error", "error_details": "At least 2 images are required for group analysis."}
     
     try:
         pixel_spacing_mm = _get_pixel_spacing(datasets[0])
@@ -81,7 +81,7 @@ def process_nnps_for_group(datasets: List[pydicom.Dataset]) -> Dict[str, Any]:
         
         ref_shape = images_in_uGy[0].shape
         for img in images_in_uGy[1:]:
-            if img.shape != ref_shape: raise ValueError("Las imágenes del grupo tienen diferentes dimensiones.")
+            if img.shape != ref_shape: raise ValueError("Images in the group have different dimensions.")
 
         mean_kerma_uGy = np.mean([_calculate_kerma_from_roi(img, pixel_spacing_mm) for img in images_in_uGy])
         nnps_results = _calculate_nnps_for_group_logic(images_in_uGy, pixel_spacing_mm, mean_kerma_uGy)
@@ -92,10 +92,10 @@ def process_nnps_for_group(datasets: List[pydicom.Dataset]) -> Dict[str, Any]:
 
 def process_series_for_nnps(datasets: List[pydicom.Dataset]) -> Dict[str, Any]:
     """
-    Agrupa datasets por Kerma y calcula el NNPS para cada grupo válido.
+    Groups datasets by Kerma and calculates the NNPS for each valid group.
     """
     if not datasets:
-        return {"status": "Error", "error_details": "La lista de datasets está vacía."}
+        return {"status": "Error", "error_details": "The list of datasets is empty."}
 
     try:
         pixel_spacing_mm = _get_pixel_spacing(datasets[0])
