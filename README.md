@@ -1,3 +1,5 @@
+Of course\! Here is the complete, corrected, and updated `README.md` file translated into English.
+
 # DICOM MCP Server
 
 A powerful, high-performance [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for interacting with DICOM PACS archives. This project provides a bridge between modern AI models and standard medical imaging systems, supporting both DICOMweb (QIDO-RS, WADO-RS) and traditional DIMSE (C-FIND, C-ECHO) protocols.
@@ -8,25 +10,20 @@ Built with [**FastMCP**](https://gofastmcp.com/), `pynetdicom`, and `httpx`.
 
 ## ✨ Key Features
 
-* **Dual Protocol Support**: Interact with your PACS using modern, web-friendly **DICOMweb** services or traditional **DIMSE** operations.
+  * **Dual Protocol Support**: Interact with your PACS using modern, web-friendly **DICOMweb** services or traditional **DIMSE** operations.
+  * **Dynamic Node Management**: Switch between multiple configured PACS nodes (`switch_dicom_node`) and verify connectivity (`verify_connection`) on the fly.
+  * **Advanced Querying**:
+      * A generic and powerful **QIDO-RS** query tool (`qido_web_query`) for flexible searches.
+      * Helper tools for standard C-FIND queries at the Patient, Study, and Series levels.
+  * **Advanced Image Analysis**: Includes a high-level tool (`analyze_mtf_for_series`) to perform a complete **Modulation Transfer Function (MTF)** analysis on an entire DICOM series with a single call.
+  * **Configuration-Driven**: Easily configure all your DICOM nodes and server settings in a simple `configuration.yaml` file.
+  * **Structured & Validated I/O**: Leverages Pydantic models for all tool inputs and outputs, ensuring data consistency and clear API contracts.
 
-* **Dynamic Node Management**: Switch between multiple configured PACS nodes (`list_dicom_nodes`, `switch_dicom_node`) and verify connectivity (`verify_connection`) on the fly.
-
-* **Advanced Querying**:
-
-  * A generic and powerful **QIDO-RS** query tool (`qido_web_query`) for flexible searches.
-
-  * Helper tools for standard C-FIND queries at the Patient, Study, and Series levels.
-
-* **Advanced Image Analysis**: Includes a high-level tool (`analyze_mtf_for_series`) to perform complete **Modulation Transfer Function (MTF)** analysis on an entire DICOM series with a single call.
-
-* **Configuration-Driven**: Easily configure all your DICOM nodes and server settings in a simple `configuration.yaml` file.
-
-* **Structured & Validated I/O**: Leverages Pydantic models for all tool inputs and outputs, ensuring data consistency and clear API contracts.
+-----
 
 ## ⚙️ Configuration
 
-Before running the server, you must create a `configuration.yaml` file. The server will look for this file in the `src/dicom_mcp/` directory by default.
+Before running the server, you must create a `configuration.yaml` file. By default, the server will look for this file in the project's root directory.
 
 Here is an example `configuration.yaml`:
 
@@ -60,79 +57,107 @@ dicomweb_timeout: 60.0
 local_storage_dir: "./dicom_storage"
 ```
 
+-----
+
 ## 🚀 Installation and Running the Server
 
-1.  **Install the package**:
+The `fastmcp` ecosystem recommends using **uv** for dependency and environment management.
 
-    For regular use, install the package from the root of the repository:
+### 1\. Installation
 
-    ```bash
-    pip install .
-    ```
+To contribute to development, clone the repository and install the dependencies in editable mode:
 
-    For development, install in editable mode:
+```bash
+# Clone the repository
+git clone https://github.com/aotal/dicom-mcp.git
+cd dicom-mcp
 
-    ```bash
-    pip install -e .
-    ```
+# Create and activate a virtual environment with uv
+uv venv
+source .venv/bin/activate
 
-2.  **Run the server**:
+# Install the package and its development dependencies
+uv pip install -e ".[dev]"
+```
 
-    You can run the server from your terminal. By default, it uses the `stdio` transport, but you can also specify `sse` for Server-Sent Events.
+### 2\. Running the Server
 
-    ```bash
-    # Run with stdio transport
-    python -m src.dicom_mcp
+You can run the server in several ways, depending on your needs.
 
-    # Run with SSE transport
-    python -m src.dicom_mcp --transport sse
-    ```
+#### HTTP Mode (Recommended for Development and Client Testing)
+
+Start the server to listen for HTTP requests. This is the best option for testing with clients or development tools.
+
+```bash
+uv run python -m src.dicom_mcp --transport http --port 8000
+```
+
+The server will be available at `http://127.0.0.1:8000/mcp/`.
+
+#### Stdio Mode (For Local Clients like Claude Desktop)
+
+This mode is for integration with clients that manage the server process directly.
+
+```bash
+uv run python -m src.dicom_mcp --transport stdio
+```
+
+### 3\. Connecting with a Test Client
+
+With the server running in HTTP mode, you can use a test client to interact with it:
+
+```python
+# test_client.py
+import asyncio
+from fastmcp import Client
+
+async def main():
+    async with Client("http://127.0.0.1:8000/mcp/") as client:
+        print("✅ Connection established.")
+        
+        # Call a tool
+        result = await client.call_tool("verify_connection")
+        print(f"Result of verify_connection: {result.data.message}")
+        
+        # Read a resource
+        resource = await client.read_resource("resource://dicom_nodes")
+        print(f"Configured nodes: {resource[0].text}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+-----
 
 ## 🛠️ Available Tools (API Reference)
 
-This server exposes a powerful set of tools through the MCP protocol. Here are some of the key tools available:
-
 ### Node Management
 
-* **`list_dicom_nodes()`**: Lists all DICOM nodes configured in `configuration.yaml` and indicates which one is currently active.
-
-* **`switch_dicom_node(node_name: str)`**: Switches the active DICOM connection to another configured node.
-
-* **`verify_connection()`**: Performs a DICOM C-ECHO to verify connectivity with the currently active node.
+  * **`list_dicom_nodes()`**: (`Resource`) Lists configured DICOM nodes and indicates the active one.
+  * **`switch_dicom_node(node_name: str)`**: (`Tool`) Switches the active DICOM node.
+  * **`verify_connection()`**: (`Tool`) Tests the connection to the active node using C-ECHO.
 
 ### DICOMweb Querying
 
-* **`qido_web_query(query_level: str, query_params: dict)`**: A generic and powerful tool to perform any QIDO-RS query.
-
-  * `query_level`: The resource path (e.g., `studies`, `series`, `studies/{uid}/instances`).
-
-  * `query_params`: A dictionary with filter criteria (e.g., `{"PatientName": "DOE*", "includefield": "PatientID"}`).
-
-* **`find_mtf_instances_in_series(study_instance_uid: str, series_instance_uid: str)`**: A high-level tool that finds and returns **only** the instances within a series that have `ImageComments` set to "MTF".
-
-  > **Note**: This tool internally performs a broad query and then filters the results. This ensures accuracy even if the PACS does not support filtering on the `ImageComments` attribute.
+  * **`qido_web_query(query_level: str, query_params: dict)`**: (`Tool`) Performs a generic QIDO-RS query.
+  * **`find_mtf_instances_in_series(study_instance_uid: str, series_instance_uid: str)`**: (`Tool`) Finds and returns only instances with `ImageComments='MTF'` in a series.
 
 ### MTF Analysis
 
-* **`analyze_mtf_for_series(study_instance_uid: str, series_instance_uid: str)`**: The main workflow tool. It automatically finds all instances with `ImageComments` = "MTF" in the specified series, downloads their data in memory, and returns a complete, averaged MTF analysis.
+  * **`analyze_mtf_for_series(study_instance_uid: str, series_instance_uid: str)`**: (`Tool`) Main workflow that finds MTF instances, downloads them, and returns a complete, averaged MTF analysis.
+  * **`calculate_mtf_from_instances(study_instance_uid: str, series_instance_uid: str, sop_instance_uids: List[str])`**: (`Tool`) Low-level tool that calculates the averaged MTF for an explicit list of instances.
 
-* **`calculate_mtf_from_instances(study_instance_uid: str, series_instance_uid: str, sop_instance_uids: List[str])`**: A lower-level tool that calculates the averaged MTF for an explicit list of SOP Instance UIDs.
+## 🏛️ Architecture
 
-## 🏛️ Architecture Overview
-
-* **MCP Framework**: [FastMCP](https://gofastmcp.com/) is used to create the server, tools, and resources.
-
-* **DIMSE Protocol**: [pynetdicom](https://github.com/pydicom/pynetdicom) is used for traditional DICOM networking (C-FIND, C-ECHO).
-
-* **DICOMweb Protocol**: [httpx](https://www.python-httpx.org/) is used for making modern RESTful requests to QIDO-RS and WADO-RS endpoints.
-
-* **Configuration**: [PyYAML](https://pyyaml.org/) and [Pydantic](https://docs.pydantic.dev/) are used for loading and validating the `configuration.yaml` file.
-
-* **DICOM File Handling**: [pydicom](https://github.com/pydicom/pydicom) is used for reading and parsing DICOM datasets.
+  * **MCP Framework**: [FastMCP](https://gofastmcp.com/)
+  * **DIMSE Protocol**: [pynetdicom](https://github.com/pydicom/pynetdicom)
+  * **DICOMweb Protocol**: [httpx](https://www.python-httpx.org/)
+  * **Configuration**: [PyYAML](https://pyyaml.org/) and [Pydantic](https://docs.pydantic.dev/)
+  * **DICOM File Handling**: [pydicom](https://github.com/pydicom/pydicom)
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a pull request or open an issue to discuss potential changes.
+Contributions are welcome\! Please feel free to submit a pull request or open an issue to discuss potential changes.
 
 ## 📄 License
 

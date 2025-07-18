@@ -1,52 +1,52 @@
-# src/dicom_mcp/mtf_processor_wrapper.py (VERSIÓN FINAL Y ROBUSTA)
+# src/dicom_mcp/mtf_processor_wrapper.py
 
 import numpy as np
 import pydicom
 from typing import List, Dict, Any
 
-# Importamos las clases de análisis desde la subcarpeta MTF
+# Import analysis classes from the MTF subfolder
 from .MTF.roi_extractor import RoiExtractor
 from .MTF.mtf_analyzer import MtfAnalyzer
 from .MTF.utils import apply_dicom_linearity
 
 def _get_pixel_spacing(ds: pydicom.Dataset) -> float:
     """
-    Obtiene el espaciado de píxeles (en mm) del dataset DICOM de forma robusta.
-    Busca en los tags más comunes en orden de preferencia.
+    Robustly retrieves the pixel spacing (in mm) from a DICOM dataset.
+    Searches common tags in order of preference.
     """
-    # 1. Pixel Spacing (0028,0030) - El más común para imágenes proyectadas
+    # 1. Pixel Spacing (0028,0030) - Most common for projection images
     if "PixelSpacing" in ds:
         spacing = ds.PixelSpacing
-        # Es un tag multi-valor (Row, Column), asumimos píxeles cuadrados
+        # It's a multi-valued tag (Row, Column), we assume square pixels
         return float(spacing[0])
     
-    # 2. Imager Pixel Spacing (0018,1164) - Común en detectores
+    # 2. Imager Pixel Spacing (0018,1164) - Common in detectors
     if "ImagerPixelSpacing" in ds:
         spacing = ds.ImagerPixelSpacing
         return float(spacing[0])
         
-    # 3. Spatial Resolution (0018,1050) - Como mencionaste
+    # 3. Spatial Resolution (0018,1050)
     if "SpatialResolution" in ds:
-        # Este tag suele ser un valor único
+        # This tag is usually a single value
         return float(ds.SpatialResolution)
 
-    # 4. Nominal Scanned Pixel Spacing (0018,2010) - Otra alternativa
+    # 4. Nominal Scanned Pixel Spacing (0018,2010) - Another alternative
     if "NominalScannedPixelSpacing" in ds:
         spacing = ds.NominalScannedPixelSpacing
         return float(spacing[0])
 
-    raise ValueError("No se pudo encontrar un tag de espaciado de píxeles válido (PixelSpacing, ImagerPixelSpacing, SpatialResolution, etc.).")
+    raise ValueError("Could not find a valid pixel spacing tag (PixelSpacing, ImagerPixelSpacing, SpatialResolution, etc.).")
 
 def process_mtf_from_datasets(datasets: List[pydicom.Dataset]) -> Dict[str, Any]:
     """
-    Orquesta el proceso de cálculo de MTF a partir de una lista de datasets DICOM.
-    Extrae el Pixel Spacing, linealiza la imagen y promedia los resultados de MTF.
+    Orchestrates the MTF calculation process from a list of DICOM datasets.
+    This function extracts pixel spacing, linearizes the image, and averages MTF results.
     """
     if not datasets:
-        return {"status": "Error", "error_details": "La lista de datasets está vacía."}
+        return {"status": "Error", "error_details": "The list of datasets is empty."}
 
     try:
-        # 1. Extraer Pixel Spacing del primer dataset y validar consistencia
+        # 1. Extract Pixel Spacing from the first dataset and validate consistency
         pixel_spacing_mm = _get_pixel_spacing(datasets[0])
         ref_shape = datasets[0].pixel_array.shape
         
@@ -54,7 +54,7 @@ def process_mtf_from_datasets(datasets: List[pydicom.Dataset]) -> Dict[str, Any]
         horizontal_mtf_results = []
         processed_files_count = 0
 
-        # Parámetros para la extracción de ROI y análisis MTF
+        # Parameters for ROI extraction and MTF analysis
         roi1_offset_mm = (13, 0)
         roi1_shape_yx = (100, 200)
         roi2_offset_mm = (0, -14)
@@ -63,24 +63,24 @@ def process_mtf_from_datasets(datasets: List[pydicom.Dataset]) -> Dict[str, Any]
         analyzer = MtfAnalyzer(**mtf_params)
 
         for i, ds in enumerate(datasets):
-            # Validar consistencia de spacing y dimensiones
+            # Validate consistency of spacing and dimensions
             if _get_pixel_spacing(ds) != pixel_spacing_mm:
-                raise ValueError(f"Inconsistencia en Pixel Spacing en la instancia #{i+1}.")
+                raise ValueError(f"Inconsistent Pixel Spacing in instance #{i+1}.")
             if ds.pixel_array.shape != ref_shape:
-                raise ValueError(f"Las imágenes tienen diferentes dimensiones en la instancia #{i+1}.")
+                raise ValueError(f"Images have different dimensions in instance #{i+1}.")
 
-            # 2. Aplicar linealización (RescaleSlope/Intercept)
+            # 2. Apply linearization (RescaleSlope/Intercept)
             linearized_image = apply_dicom_linearity(ds)
 
-            # 3. Extraer ROIs
+            # 3. Extract ROIs
             extractor = RoiExtractor(linearized_image, pixel_spacing_mm, verbose=False)
             rois = extractor.extract_mtf_rois(roi1_offset_mm, roi1_shape_yx, roi2_offset_mm, roi2_shape_yx)
             
             if not rois or len(rois) != 2:
-                print(f"Advertencia: No se pudieron extraer las ROIs para la instancia #{i+1}. Se omite.")
+                print(f"Warning: Could not extract ROIs for instance #{i+1}. Skipping.")
                 continue
 
-            # 4. Analizar cada ROI para obtener las curvas MTF
+            # 4. Analyze each ROI to obtain MTF curves
             res_v = analyzer.analyze_roi(rois[0], pixel_spacing_mm, roi_id=f"inst_{i+1}_v", verbose=False)
             if res_v and res_v.get("status") == "OK":
                 vertical_mtf_results.append(res_v)
@@ -91,14 +91,14 @@ def process_mtf_from_datasets(datasets: List[pydicom.Dataset]) -> Dict[str, Any]
             
             processed_files_count += 1
 
-        # 5. Promediar resultados y devolver
+        # 5. Average the results and return
         valid_v_rois = len(vertical_mtf_results)
         valid_h_rois = len(horizontal_mtf_results)
 
         if valid_v_rois == 0 and valid_h_rois == 0:
-            return {"status": "Error", "error_details": "No se pudieron obtener resultados MTF válidos."}
+            return {"status": "Error", "error_details": "Could not obtain any valid MTF results."}
 
-        # Lógica de promediado (similar a la de NNPS)
+        # Averaging logic (similar to NNPS)
         vert_avg, horiz_avg, combined_avg, combined_freq = None, None, None, None
 
         if valid_v_rois > 0:
@@ -117,13 +117,13 @@ def process_mtf_from_datasets(datasets: List[pydicom.Dataset]) -> Dict[str, Any]
         elif horiz_avg is not None: combined_avg = horiz_avg
 
         if combined_avg is None:
-            raise ValueError("Fallo al combinar las curvas MTF.")
+            raise ValueError("Failed to combine MTF curves.")
 
         coeffs, _, fit_stats = analyzer.fit_average_mtf_polynomial(combined_freq, combined_avg, degree=4)
         
-        # --- CÁLCULO DE MTF AL 50% Y 10% ---
+        # --- MTF CALCULATION AT 50% AND 10% ---
         freq_at_50_mtf = np.interp(0.5, combined_avg[::-1], combined_freq[::-1])
-        freq_at_10_mtf = np.interp(0.1, combined_avg[::-1], combined_freq[::-1]) # <-- NUEVA LÍNEA
+        freq_at_10_mtf = np.interp(0.1, combined_avg[::-1], combined_freq[::-1]) # New line
 
         return {
             "status": "OK",
@@ -134,7 +134,7 @@ def process_mtf_from_datasets(datasets: List[pydicom.Dataset]) -> Dict[str, Any]
             "fit_r_squared": fit_stats.get('r_squared'),
             "fit_rmse": fit_stats.get('rmse'),
             "mtf_at_50_percent": freq_at_50_mtf,
-            "mtf_at_10_percent": freq_at_10_mtf, # <-- NUEVO CAMPO EN EL RESULTADO
+            "mtf_at_10_percent": freq_at_10_mtf, # New field in the result
             "error_details": None
         }
 
